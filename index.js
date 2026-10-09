@@ -2,110 +2,99 @@
 const {
   Client,
   GatewayIntentBits,
-  ChannelType,
-  PermissionFlagsBits,
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder,
-  SlashCommandBuilder,
-  REST,
-  Routes
+  ChannelType,
+  PermissionFlagsBits
 } = require("discord.js");
-
-const TOKEN = process.env.DISCORD_TOKEN;
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+const TOKEN = process.env.DISCORD_TOKEN;
+const GUILD_ID = "1556066421757317130";
+
 const command = new SlashCommandBuilder()
   .setName("ticket-panel")
-  .setDescription("إرسال لوحة VENOM Ticket");
+  .setDescription("Send the ticket panel");
 
 client.once("ready", async () => {
-  console.log(`VENOM Ticket online: ${client.user.tag}`);
+  console.log(`Logged in as ${client.user.tag}`);
 
   try {
     const rest = new REST({ version: "10" }).setToken(TOKEN);
+
     await rest.put(
-      Routes.applicationCommands(client.user.id),
+      Routes.applicationGuildCommands(client.user.id, GUILD_ID),
       { body: [command.toJSON()] }
     );
-    console.log("Slash command registered!");
+
+    console.log("Guild slash command registered!");
   } catch (error) {
     console.error("Command registration failed:", error);
   }
 });
 
 client.on("interactionCreate", async interaction => {
-  if (!interaction.inGuild()) return;
+  if (!interaction.isChatInputCommand() &&
+      !interaction.isButton()) return;
 
   if (interaction.isChatInputCommand()) {
     if (interaction.commandName !== "ticket-panel") return;
 
-    if (!interaction.memberPermissions?.has(
-      PermissionFlagsBits.ManageGuild
-    )) {
-      return interaction.reply({
-        content: "❌ هذا الأمر للإدارة فقط.",
-        ephemeral: true
-      });
-    }
-
     const embed = new EmbedBuilder()
       .setColor(0x00BFFF)
       .setTitle("🎟️ VENOM TICKET")
-      .setDescription(
-        "تحتاج مساعدة؟ اضغط على Open Ticket لفتح قناة خاصة."
-      )
-      .setFooter({ text: "POWER • VENOM Support" });
+      .setDescription("اضغط على الزر لفتح تذكرة خاصة مع فريق الإدارة.");
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId("ticket:open")
+        .setCustomId("ticket-open")
         .setLabel("Open Ticket")
         .setEmoji("🎟️")
         .setStyle(ButtonStyle.Primary)
     );
 
-    return interaction.reply({
+    await interaction.reply({
       embeds: [embed],
       components: [row]
     });
   }
 
-  if (!interaction.isButton()) return;
-
-  if (interaction.customId === "ticket:open") {
+  if (interaction.isButton() &&
+      interaction.customId === "ticket-open") {
     await interaction.deferReply({ ephemeral: true });
 
-    try {
-      const guild = interaction.guild;
-      const ownerId = interaction.user.id;
+    const existing = interaction.guild.channels.cache.find(
+      channel =>
+        channel.name === `ticket-${interaction.user.id}` &&
+        channel.type === ChannelType.GuildText
+    );
 
-      const existing = guild.channels.cache.find(
-        c => c.type === ChannelType.GuildText &&
-        c.topic === `ticket-owner:${ownerId}`
+    if (existing) {
+      await interaction.editReply(
+        `عندك تذكرة مفتوحة بالفعل: ${existing}`
       );
+      return;
+    }
 
-      if (existing) {
-        return interaction.editReply(
-          `عندك تكت مفتوح بالفعل: ${existing}`
-        );
-      }
-
-      const channel = await guild.channels.create({
-        name: `ticket-${ownerId}`,
+    try {
+      const channel = await interaction.guild.channels.create({
+        name: `ticket-${interaction.user.id}`,
         type: ChannelType.GuildText,
-        topic: `ticket-owner:${ownerId}`,
         permissionOverwrites: [
           {
-            id: guild.roles.everyone.id,
+            id: interaction.guild.id,
             deny: [PermissionFlagsBits.ViewChannel]
           },
           {
-            id: ownerId,
+            id: interaction.user.id,
             allow: [
               PermissionFlagsBits.ViewChannel,
               PermissionFlagsBits.SendMessages,
@@ -126,7 +115,7 @@ client.on("interactionCreate", async interaction => {
 
       const closeRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId("ticket:close")
+          .setCustomId("ticket-close")
           .setLabel("Close Ticket")
           .setEmoji("🔒")
           .setStyle(ButtonStyle.Danger)
@@ -137,39 +126,47 @@ client.on("interactionCreate", async interaction => {
         components: [closeRow]
       });
 
-      await interaction.editReply(`✅ تم فتح تكتك: ${channel}`);
-    } catch (error) {
-      console.error(error);
       await interaction.editReply(
-        "❌ تعذر فتح التكت. تحقق من صلاحيات البوت."
+        `تم فتح تذكرتك بنجاح: ${channel}`
+      );
+    } catch (error) {
+      console.error("Ticket creation failed:", error);
+      await interaction.editReply(
+        "ما قدرتش نفتح التذكرة. تأكد أن البوت عنده Manage Channels."
       );
     }
   }
 
-  if (interaction.customId === "ticket:close") {
+  if (interaction.isButton() &&
+      interaction.customId === "ticket-close") {
     const channel = interaction.channel;
-    const ownerId = channel.topic?.startsWith("ticket-owner:")
-      ? channel.topic.slice("ticket-owner:".length)
-      : null;
 
-    const isOwner = interaction.user.id === ownerId;
-    const isAdmin = interaction.memberPermissions?.has(
+    const isOwner =
+      channel.name === `ticket-${interaction.user.id}`;
+
+    const canManage = interaction.memberPermissions?.has(
       PermissionFlagsBits.ManageChannels
     );
 
-    if (!isOwner && !isAdmin) {
-      return interaction.reply({
-        content: "❌ ليس لديك صلاحية إغلاق هذا التكت.",
+    if (!isOwner && !canManage) {
+      await interaction.reply({
+        content: "غير صاحب التذكرة أو الإدارة يقدر يغلقها.",
         ephemeral: true
       });
+      return;
     }
 
-    await interaction.reply("🔒 سيتم إغلاق التكت بعد 3 ثوانٍ.");
+    await interaction.reply("🔒 سيتم إغلاق التذكرة بعد 3 ثوانٍ.");
 
-    setTimeout(() => {
-      channel.delete("VENOM Ticket closed").catch(console.error);
+    setTimeout(async () => {
+      try {
+        await channel.delete("Ticket closed");
+      } catch (error) {
+        console.error("Ticket close failed:", error);
+      }
     }, 3000);
   }
 });
 
 client.login(TOKEN);
+      
