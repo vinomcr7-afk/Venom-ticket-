@@ -7,75 +7,105 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  EmbedBuilder
+  EmbedBuilder,
+  SlashCommandBuilder,
+  REST,
+  Routes
 } = require("discord.js");
 
+const TOKEN = process.env.DISCORD_TOKEN;
+
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
-client.once("ready", () => {
-  console.log(`VENOM Ticket is online as ${client.user.tag}`);
+const command = new SlashCommandBuilder()
+  .setName("ticket-panel")
+  .setDescription("إرسال لوحة VENOM Ticket");
+
+client.once("ready", async () => {
+  console.log(`VENOM Ticket online: ${client.user.tag}`);
+
+  try {
+    const rest = new REST({ version: "10" }).setToken(TOKEN);
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: [command.toJSON()] }
+    );
+    console.log("Slash command registered!");
+  } catch (error) {
+    console.error("Command registration failed:", error);
+  }
 });
 
-client.on("messageCreate", async (message) => {
-  if (message.author.bot || !message.guild) return;
-  if (message.content.trim() !== "!ticket-panel") return;
+client.on("interactionCreate", async interaction => {
+  if (!interaction.inGuild()) return;
 
-  if (!message.member.permissions.has(
-    PermissionFlagsBits.ManageGuild
-  )) {
-    return message.reply("الإدارة فقط يمكنها إنشاء لوحة التكت.");
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName !== "ticket-panel") return;
+
+    if (!interaction.memberPermissions?.has(
+      PermissionFlagsBits.ManageGuild
+    )) {
+      return interaction.reply({
+        content: "❌ هذا الأمر للإدارة فقط.",
+        ephemeral: true
+      });
+    }
+
+    const embed = new EmbedBuilder()
+      .setColor(0x00BFFF)
+      .setTitle("🎟️ VENOM TICKET")
+      .setDescription(
+        "تحتاج مساعدة؟ اضغط على Open Ticket لفتح قناة خاصة."
+      )
+      .setFooter({ text: "POWER • VENOM Support" });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId("ticket:open")
+        .setLabel("Open Ticket")
+        .setEmoji("🎟️")
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    return interaction.reply({
+      embeds: [embed],
+      components: [row]
+    });
   }
 
-  const embed = new EmbedBuilder()
-    .setColor(0x00BFFF)
-    .setTitle("🎟️ VENOM TICKET")
-    .setDescription("اضغط على Open Ticket لفتح تكت خاص مع الإدارة.");
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId("ticket:open")
-      .setLabel("Open Ticket")
-      .setEmoji("🎟️")
-      .setStyle(ButtonStyle.Primary)
-  );
-
-  await message.channel.send({ embeds: [embed], components: [row] });
-});
-
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isButton() || !interaction.guild) return;
+  if (!interaction.isButton()) return;
 
   if (interaction.customId === "ticket:open") {
     await interaction.deferReply({ ephemeral: true });
 
     try {
       const guild = interaction.guild;
+      const ownerId = interaction.user.id;
+
       const existing = guild.channels.cache.find(
         c => c.type === ChannelType.GuildText &&
-        c.topic === `ticket-owner:${interaction.user.id}`
+        c.topic === `ticket-owner:${ownerId}`
       );
 
       if (existing) {
-        return interaction.editReply(`عندك تكت مفتوح: ${existing}`);
+        return interaction.editReply(
+          `عندك تكت مفتوح بالفعل: ${existing}`
+        );
       }
 
       const channel = await guild.channels.create({
-        name: `ticket-${interaction.user.id}`,
+        name: `ticket-${ownerId}`,
         type: ChannelType.GuildText,
-        topic: `ticket-owner:${interaction.user.id}`,
+        topic: `ticket-owner:${ownerId}`,
         permissionOverwrites: [
           {
             id: guild.roles.everyone.id,
             deny: [PermissionFlagsBits.ViewChannel]
           },
           {
-            id: interaction.user.id,
+            id: ownerId,
             allow: [
               PermissionFlagsBits.ViewChannel,
               PermissionFlagsBits.SendMessages,
@@ -107,10 +137,12 @@ client.on("interactionCreate", async (interaction) => {
         components: [closeRow]
       });
 
-      await interaction.editReply(`تم فتح تكتك: ${channel}`);
+      await interaction.editReply(`✅ تم فتح تكتك: ${channel}`);
     } catch (error) {
       console.error(error);
-      await interaction.editReply("تعذر فتح التكت. تحقق من صلاحيات البوت.");
+      await interaction.editReply(
+        "❌ تعذر فتح التكت. تحقق من صلاحيات البوت."
+      );
     }
   }
 
@@ -127,16 +159,17 @@ client.on("interactionCreate", async (interaction) => {
 
     if (!isOwner && !isAdmin) {
       return interaction.reply({
-        content: "ليس لديك صلاحية إغلاق هذا التكت.",
+        content: "❌ ليس لديك صلاحية إغلاق هذا التكت.",
         ephemeral: true
       });
     }
 
     await interaction.reply("🔒 سيتم إغلاق التكت بعد 3 ثوانٍ.");
+
     setTimeout(() => {
-      channel.delete().catch(console.error);
+      channel.delete("VENOM Ticket closed").catch(console.error);
     }, 3000);
   }
 });
 
-client.login(process.env.DISCORD_TOKEN);
+client.login(TOKEN);
