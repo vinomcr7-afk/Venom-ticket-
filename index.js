@@ -480,3 +480,219 @@ e: "🗂️ الفئة", value: product.category, inline: true }
 });
 
 client.login(TOKEN);
+
+async function registerCommands() {
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+  const route = GUILD_ID
+    ? Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID)
+    : Routes.applicationCommands(CLIENT_ID);
+
+  await rest.put(route, { body: commands });
+  console.log('VENOM SHOP commands registered!');
+}
+
+client.once('ready', () => {
+  console.log(`VENOM SHOP Online: ${client.user.tag}`);
+});
+
+client.on('interactionCreate', async interaction => {
+  try {
+    // Publish shop panel
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === 'ticketpanel'
+    ) {
+      const embed = new EmbedBuilder()
+        .setColor(0x168CFF)
+        .setTitle('🛒 SHOP & SUPPORT')
+        .setDescription(
+          'Bienvenue dans VENOM SHOP !\n\n' +
+          '🛒 Cliquez sur GO TO SHOP pour voir les produits.\n' +
+          '💳 Choisissez votre produit et la quantité.\n' +
+          '🎫 Un ticket privé sera créé pour votre commande.\n\n' +
+          'Respectez le staff et évitez le spam.'
+        )
+        .setFooter({ text: 'VENOM SHOP • Support & Orders' });
+
+      await interaction.reply({
+        embeds: [embed],
+        components: shopComponents()
+      });
+      return;
+    }
+
+    // Show shop
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === 'shop'
+    ) {
+      await interaction.reply({
+        embeds: [makeShopEmbed()],
+        components: shopComponents(),
+        ephemeral: true
+      });
+      return;
+    }
+
+    // Add product
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === 'addproduct'
+    ) {
+      const name = interaction.options.getString('name', true);
+      const price = interaction.options.getNumber('price', true);
+      const stock = interaction.options.getInteger('stock', true);
+
+      const id = name.toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 80) || `product-${Date.now()}`;
+
+      if (products.has(id)) {
+        await interaction.reply({
+          content: `هذا المنتج موجود مسبقًا: ${id}`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      products.set(id, {
+        name,
+        price,
+        stock,
+        image: ''
+      });
+
+      await interaction.reply({
+        content: `✅ تمت إضافة المنتج: ${name}\nID: ${id}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    // Update stock
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === 'setstock'
+    ) {
+      const id = interaction.options.getString('product_id', true);
+      const quantity = interaction.options.getInteger('quantity', true);
+      const product = products.get(id);
+
+      if (!product) {
+        await interaction.reply({
+          content: '❌ المنتج غير موجود. تحقق من ID.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      product.stock = quantity;
+
+      await interaction.reply({
+        content: `✅ مخزون ${product.name}: ${quantity}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    // Remove product
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === 'removeproduct'
+    ) {
+      const id = interaction.options.getString('product_id', true);
+
+      if (!products.has(id)) {
+        await interaction.reply({
+          content: '❌ المنتج غير موجود.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const name = products.get(id).name;
+      products.delete(id);
+
+      await interaction.reply({
+        content: `🗑️ تم حذف ${name}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    // Refresh shop buttons
+    if (
+      interaction.isButton() &&
+      [
+        'venom_shop_refresh',
+        'venom_shop_prices'
+      ].includes(interaction.customId)
+    ) {
+      await interaction.reply({
+        embeds: [makeShopEmbed()],
+        components: shopComponents(),
+        ephemeral: true
+      });
+      return;
+    }
+
+    // Product selection
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId === 'venom_product_select'
+    ) {
+      const id = interaction.values[0];
+      const product = products.get(id);
+
+      if (!product || product.stock < 1) {
+        await interaction.reply({
+          content: '❌ هذا المنتج غير متوفر.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setColor(0x168CFF)
+        .setTitle(`🛒 ${product.name}`)
+        .setDescription(
+          `السعر: **${product.price}**\n` +
+          `المخزون: **${product.stock}**\n\n` +
+          'اضغط على الزر لاختيار الكمية.'
+        );
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`venom_order_${id}`)
+          .setLabel('🛒 Commander / Order')
+          .setStyle(ButtonStyle.Success)
+      );
+
+      await interaction.reply({
+        embeds: [embed],
+        components: [row],
+        ephemeral: true
+      });
+      return;
+    }
+  } catch (error) {
+    console.error(error);
+
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: '❌ حدث خطأ. راجع سجلات Railway.',
+        ephemeral: true
+      }).catch(() => {});
+    }
+  }
+});
+
+registerCommands()
+  .then(() => client.login(TOKEN))
+  .catch(error => {
+    console.error('Startup error:', error);
+    process.exit(1);
+  });
+        
