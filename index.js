@@ -1,3 +1,7 @@
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
 
 const {
   Client,
@@ -6,155 +10,504 @@ const {
   EmbedBuilder,
   REST,
   Routes,
-  SlashCommandBuilder
+  SlashCommandBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  ChannelType,
+  PermissionFlagsBits,
 } = require('discord.js');
+
+// ==========================================
+// VENOM SHOP — CONFIGURATION
+// ==========================================
 
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
+const SHOP_BANNER_URL = process.env.SHOP_BANNER_URL;
+
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const PRODUCTS_FILE = path.join(DATA_DIR, 'products.json');
 
 const RED = 0xE50914;
+const BLUE = 0x168CFF;
+const GREEN = 0x2ECC71;
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('Missing TOKEN or CLIENT_ID in Railway Variables.');
   process.exit(1);
 }
 
+// ==========================================
+// CLIENT
+// ==========================================
+
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds]
+  intents: [GatewayIntentBits.Guilds],
 });
+
+const products = new Map();
+
+// ==========================================
+// PRODUCTS STORAGE
+// ==========================================
+
+function loadProducts() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+
+    if (!fs.existsSync(PRODUCTS_FILE)) {
+      fs.writeFileSync(PRODUCTS_FILE, '{}', 'utf8');
+    }
+
+    const data = JSON.parse(
+      fs.readFileSync(PRODUCTS_FILE, 'utf8')
+    );
+
+    for (const [id, product] of Object.entries(data)) {
+      if (!product || typeof product.name !== 'string') {
+        continue;
+      }
+
+      products.set(id, {
+        id,
+        name: product.name,
+        price: Number(product.price) || 0,
+        stock: Math.max(
+          0,
+          Number.parseInt(product.stock, 10) || 0
+        ),
+        image: typeof product.image === 'string'
+          ? product.image
+          : '',
+      });
+    }
+
+    console.log(`Loaded ${products.size} products.`);
+  } catch (error) {
+    console.error('Could not load products:', error);
+    process.exit(1);
+  }
+}
+
+function saveProducts() {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+
+    const data = Object.fromEntries(products.entries());
+
+    fs.writeFileSync(
+      PRODUCTS_FILE,
+      JSON.stringify(data, null, 2),
+      'utf8'
+    );
+
+    return true;
+  } catch (error) {
+    console.error('Could not save products:', error);
+    return false;
+  }
+}
+
+// ==========================================
+// HELPERS
+// ==========================================
+
+function slugify(value) {
+  const slug = value
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+
+  return slug || `product-${Date.now().toString(36)}`;
+}
+
+function isStaff(interaction) {
+  if (!interaction.inGuild()) {
+    return false;
+  }
+
+  if (
+    interaction.memberPermissions?.has(
+      PermissionFlagsBits.ManageGuild
+    )
+  ) {
+    return true;
+  }
+
+  if (!STAFF_ROLE_ID) {
+    return false;
+  }
+
+  const roles = interaction.member?.roles;
+
+  return Boolean(
+    roles?.cache?.has(STAFF_ROLE_ID) ||
+    roles?.includes?.(STAFF_ROLE_ID)
+  );
+}
+
+async function requireStaff(interaction) {
+  if (isStaff(interaction)) {
+    return true;
+  }
+
+  await interaction.reply({
+    content: '❌ هذا الأمر مخصص للإدارة فقط.',
+    ephemeral: true,
+  });
+
+  return false;
+}
+
+// ==========================================
+// PRIVATE TICKETS
+// ==========================================
+
+async function createPrivateChannel(guild, name, userId) {
+  const permissionOverwrites = [
+    {
+      id: guild.roles.everyone.id,
+      deny: [PermissionFlagsBits.ViewChannel],
+    },
+    {
+      id: userId,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    },
+    {
+      id: client.user.id,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.ManageChannels,
+        PermissionFlagsBits.EmbedLinks,
+      ],
+    },
+  ];
+
+  if (
+    STAFF_ROLE_ID &&
+    guild.roles.cache.has(STAFF_ROLE_ID)
+  ) {
+    permissionOverwrites.push({
+      id: STAFF_ROLE_ID,
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+      ],
+    });
+  }
+
+  return guild.channels.create({
+    name: name.slice(0, 90),
+    type: ChannelType.GuildText,
+    permissionOverwrites,
+    reason: 'VENOM SHOP ticket',
+  });
+}
+
+// ==========================================
+// SHOP EMBED
+// ==========================================
+
+function shopEmbed() {
+  const embed = new EmbedBuilder()
+    .setColor(RED)
+    .setTitle('🔴 VENOM SHOP')
+    .setDescription(
+      'Welcome to **VENOM SHOP**!\n\n' +
+      '🛒 اختر منتجًا من القائمة لبدء الطلب.\n' +
+      '🎫 اضغط Support لفتح تذكرة مساعدة.\n\n' +
+      '⚡ Fast service | Secure orders'
+    )
+    .setFooter({
+      text: 'VENOM SHOP | Official Store',
+    })
+    .setTimestamp();
+
+  if (
+    SHOP_BANNER_URL &&
+    /^https?:\/\/\S+$/i.test(SHOP_BANNER_URL)
+  ) {
+    embed.setImage(SHOP_BANNER_URL);
+  }
+
+  return embed;
+}
+
+// ==========================================
+// SHOP COMPONENTS
+// ==========================================
+
+function shopComponents() {
+  const rows = [];
+
+  const available = [...products.values()]
+    .filter(product => product.stock > 0)
+    .slice(0, 25);
+
+  if (available.length > 0) {
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId('venom_product_select')
+      .setPlaceholder('🛒 اختر منتجًا للشراء')
+      .addOptions(
+        available.map(product => ({
+          label: product.name.slice(0, 100),
+          description:
+            `السعر: ${product.price} | المخزون: ${product.stock}`
+              .slice(0, 100),
+          value: product.id,
+        }))
+      );
+
+    rows.push(
+      new ActionRowBuilder().addComponents(menu)
+    );
+  }
+
+  rows.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('venom_open_support')
+        .setLabel('Support')
+        .setEmoji('🎫')
+        .setStyle(ButtonStyle.Primary)
+    )
+  );
+
+  return rows;
+}
+
+// ==========================================
+// SLASH COMMANDS
+// ==========================================
 
 const commands = [
   new SlashCommandBuilder()
     .setName('shop')
-    .setDescription('Open the VENOM SHOP')
-    .toJSON()
-];
+    .setDescription('Open the VENOM SHOP'),
+
+  new SlashCommandBuilder()
+    .setName('ticketpanel')
+    .setDescription('Post the VENOM ticket panel'),
+
+  new SlashCommandBuilder()
+    .setName('addproduct')
+    .setDescription('Add a shop product')
+    .addStringOption(option =>
+      option
+        .setName('name')
+        .setDescription('Product name')
+        .setRequired(true)
+    )
+    .addNumberOption(option =>
+      option
+        .setName('price')
+        .setDescription('Product price')
+        .setMinValue(0)
+        .setRequired(true)
+    )
+    .addIntegerOption(option =>
+      option
+        .setName('stock')
+        .setDescription('Available quantity')
+        .setMinValue(0)
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option
+        .setName('image')
+        .setDescription('Optional product image URL')
+        .setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('setstock')
+    .setDescription('Update product stock')
+    .addStringOption(option =>
+      option
+        .setName('product_id')
+        .setDescription('Product ID')
+        .setRequired(true)
+    )
+    .addIntegerOption(option =>
+      option
+        .setName('quantity')
+        .setDescription('New stock quantity')
+        .setMinValue(0)
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('removeproduct')
+    .setDescription('Remove a shop product')
+    .addStringOption(option =>
+      option
+        .setName('product_id')
+        .setDescription('Product ID')
+        .setRequired(true)
+    ),
+].map(command => command.toJSON());
+
+// ==========================================
+// REGISTER COMMANDS
+// ==========================================
 
 async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-  await rest.put(
-    Routes.applicationCommands(CLIENT_ID),
-    { body: commands }
-  );
+  const route = GUILD_ID
+    ? Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID)
+    : Routes.applicationCommands(CLIENT_ID);
 
-  console.log('Slash commands registered.');
+  await rest.put(route, {
+    body: commands,
+  });
+
+  console.log('Slash commands registered successfully.');
 }
 
-client.once(Events.ClientReady, (readyClient) => {
-  console.log(`VENOM SHOP online as ${readyClient.user.tag}`);
+// ==========================================
+// BOT READY
+// ==========================================
+
+client.once(Events.ClientReady, readyClient => {
+  console.log(
+    `VENOM SHOP online as ${readyClient.user.tag}`
+  );
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
-  try {
-    if (!interaction.isChatInputCommand()) return;
+// ==========================================
+// INTERACTIONS
+// ==========================================
 
-    if (interaction.commandName === 'shop') {
-      const embed = new EmbedBuilder()
-        .setColor(RED)
-        .setTitle('🔴 VENOM SHOP')
-        .setDescription(
-          'Welcome to VENOM SHOP!\n\n' +
-          '🛒 Products and offers\n' +
-          '🎫 Contact staff for support\n' +
-          '💳 Contact staff for payment details'
-        )
-        .setFooter({
-          text: 'VENOM SHOP | Official Store'
+client.on(Events.InteractionCreate, async interaction => {
+  try {
+
+    // ======================================
+    // SLASH COMMANDS
+    // ======================================
+
+    if (interaction.isChatInputCommand()) {
+
+      // ---------- SHOP ----------
+
+      if (interaction.commandName === 'shop') {
+        await interaction.reply({
+          embeds: [shopEmbed()],
+          components: shopComponents(),
+          ephemeral: true,
         });
 
-      await interaction.reply({
-        embeds: [embed],
-        ephemeral: true
-      });
-    }
-  } catch (error) {
-    console.error('Interaction error:', error);
+        return;
+      }
 
-    if (
-      interaction.isRepliable() &&
-      !interaction.replied &&
-      !interaction.deferred
-    ) {
-      await interaction.reply({
-        content: 'An error occurred. Please contact staff.',
-        ephemeral: true
-      }).catch(console.error);
-    }
-  }
-});
+      // ---------- TICKET PANEL ----------
 
-async function startBot() {
-  try {
-    await registerCommands();
-    await client.login(TOKEN);
-  } catch (error) {
-    console.error('Startup error:', error);
-    process.exitCode = 1;
-  }
-}
+      if (interaction.commandName === 'ticketpanel') {
+        if (!(await requireStaff(interaction))) {
+          return;
+        }
 
-startBot();
-      { name: '📌 Status', value: '⏳ Waiting for staff to confirm payment' }
-          )
-          .setFooter({ text: `Product ID: ${id} | Customer ID: ${i.user.id}` });
+        if (!interaction.channel) {
+          await interaction.reply({
+            content: '❌ لا يمكن نشر اللوحة هنا.',
+            ephemeral: true,
+          });
 
-        if (p.image) embed.setThumbnail(p.image);
+          return;
+        }
 
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder()
-            .setCustomId(`venom_paid_${id}_${quantity}_${i.user.id}`)
-            .setLabel('Confirm payment')
-            .setStyle(ButtonStyle.Success),
+            .setCustomId('venom_open_shop')
+            .setLabel('Open Shop')
+            .setEmoji('🛒')
+            .setStyle(ButtonStyle.Danger),
 
           new ButtonBuilder()
-            .setCustomId('venom_close_order')
-            .setLabel('Close ticket')
-            .setStyle(ButtonStyle.Secondary)
+            .setCustomId('venom_open_support')
+            .setLabel('Support')
+            .setEmoji('🎫')
+            .setStyle(ButtonStyle.Primary)
         );
 
-        await ticket.send({
-          content: `${i.user}${STAFF_ROLE_ID ? ` <@&${STAFF_ROLE_ID}>` : ''}`,
-          embeds: [embed],
+        await interaction.channel.send({
+          embeds: [shopEmbed()],
           components: [row],
         });
 
-        try {
-          await i.user.send(
-            `🛒 Your order was created.\nProduct: ${p.name}\n` +
-            `Quantity: ${quantity}\nTotal: ${total}\nTicket: ${ticket.name}`
-          );
-        } catch (error) {
-          console.warn('Could not DM customer:', error.message);
-        }
+        await interaction.reply({
+          content: '✅ تم نشر لوحة VENOM SHOP.',
+          ephemeral: true,
+        });
 
-        await i.editReply(`✅ Your order ticket has been created: ${ticket}`);
-      } catch (error) {
-        console.error('Order creation error:', error);
-
-        if (ticket) await ticket.delete().catch(() => {});
-
-        await i.editReply('❌ Could not create order. Check bot permissions.');
+        return;
       }
 
-      return;
-    }
-  } catch (error) {
-    console.error('Interaction error:', error);
+      // ---------- PRODUCT COMMANDS ----------
 
-    try {
-      if (i.deferred || i.replied) {
-        await i.fol            .getString('name', true).trim();
+      if (
+        [
+          'addproduct',
+          'setstock',
+          'removeproduct',
+        ].includes(interaction.commandName)
+      ) {
+        if (!(await requireStaff(interaction))) {
+          return;
+        }
 
-          const price = interaction.options.getNumber('price', true);
-          const stock = interaction.options.getInteger('stock', true);
-          const image = interaction.options.getString('image') || '';
+        // ADD PRODUCT
+
+        if (interaction.commandName === 'addproduct') {
+          const name = interaction.options
+            .getString('name', true)
+            .trim();
+
+          const price = interaction.options
+            .getNumber('price', true);
+
+          const stock = interaction.options
+            .getInteger('stock', true);
+
+          const image = interaction.options
+            .getString('image') || '';
 
           if (!name || name.length > 256) {
             await interaction.reply({
-              content: '❌ Product name must be between 1 and 256 characters.',
+              content: '❌ اسم المنتج يجب أن يكون بين 1 و256 حرفًا.',
               ephemeral: true,
             });
+
+            return;
+          }
+
+          if (
+            !Number.isFinite(price) ||
+            price < 0
+          ) {
+            await interaction.reply({
+              content: '❌ السعر غير صالح.',
+              ephemeral: true,
+            });
+
             return;
           }
 
@@ -163,9 +516,10 @@ startBot();
             !/^https?:\/\/\S+$/i.test(image)
           ) {
             await interaction.reply({
-              content: '❌ Image must be an HTTP/HTTPS URL.',
+              content: '❌ رابط الصورة غير صالح.',
               ephemeral: true,
             });
+
             return;
           }
 
@@ -173,81 +527,93 @@ startBot();
 
           if (products.has(id)) {
             await interaction.reply({
-              content: `❌ Product ID \`${id}\` already exists.`,
+              content:
+                `❌ المنتج موجود بالفعل. ID: \`${id}\``,
               ephemeral: true,
             });
+
             return;
           }
 
-          products.set(id, { id, name, price, stock, image });
+          const product = {
+            id,
+            name,
+            price,
+            stock,
+            image,
+          };
+
+          products.set(id, product);
 
           if (!saveProducts()) {
             products.delete(id);
 
             await interaction.reply({
-              content: '❌ Could not save product data.',
+              content: '❌ تعذّر حفظ المنتج.',
               ephemeral: true,
             });
+
             return;
           }
 
           await interaction.reply({
-            content: `✅ Added **${name}**. ID: \`${id}\``,
+            content:
+              `✅ تمت إضافة **${name}** بنجاح.\n` +
+              `🆔 Product ID: \`${id}\`\n` +
+              `💰 Price: ${price}\n` +
+              `📦 Stock: ${stock}`,
             ephemeral: true,
           });
+
           return;
         }
 
-        if (interaction.commandName === 'setstock') {
-          const id = interaction.options
-            .getString('product_id', true);
+        const id = interaction.options
+          .getString('product_id', true)
+          .trim();
 
+        const product = products.get(id);
+
+        if (!product) {
+          await interaction.reply({
+            content: `❌ المنتج غير موجود: \`${id}\``,
+            ephemeral: true,
+          });
+
+          return;
+        }
+
+        // UPDATE STOCK
+
+        if (interaction.commandName === 'setstock') {
           const quantity = interaction.options
             .getInteger('quantity', true);
 
-          const product = products.get(id);
-
-          if (!product) {
-            await interaction.reply({
-              content: `❌ Product not found: \`${id}\``,
-              ephemeral: true,
-            });
-            return;
-          }
-
           const oldStock = product.stock;
+
           product.stock = quantity;
 
           if (!saveProducts()) {
             product.stock = oldStock;
 
             await interaction.reply({
-              content: '❌ Could not save stock changes.',
+              content: '❌ تعذّر حفظ تغييرات المخزون.',
               ephemeral: true,
             });
+
             return;
           }
 
           await interaction.reply({
             content:
-              `✅ Stock for **${product.name}** is now **${quantity}**.`,
+              `✅ مخزون **${product.name}** أصبح **${quantity}**.`,
             ephemeral: true,
           });
+
           return;
         }
 
-        const id = interaction.options
-          .getString('product_id', true);
-
-        const product = products.get(id);
-
-        if (!product) {
-          await interaction.reply({
-            content: `❌ Product not found: \`${id}\``,
-            ephemeral: true,
-          });
-          return;
-        }
+        // REMOVE PRODUCT
 
         products.delete(id);
 
@@ -255,52 +621,66 @@ startBot();
           products.set(id, product);
 
           await interaction.reply({
-            content: '❌ Could not save product changes.',
+            content: '❌ تعذّر حذف المنتج من التخزين.',
             ephemeral: true,
           });
+
           return;
         }
 
         await interaction.reply({
-          content: `✅ Removed **${product.name}**.`,
+          content: `✅ تم حذف **${product.name}**.`,
           ephemeral: true,
         });
+
         return;
       }
     }
 
-    // ---------- BUTTONS ----------
+    // ======================================
+    // BUTTONS
+    // ======================================
 
     if (interaction.isButton()) {
+
+      // ---------- OPEN SHOP ----------
+
       if (interaction.customId === 'venom_open_shop') {
         await interaction.reply({
           embeds: [shopEmbed()],
           components: shopComponents(),
           ephemeral: true,
         });
+
         return;
       }
+
+      // ---------- OPEN SUPPORT ----------
 
       if (interaction.customId === 'venom_open_support') {
         if (!interaction.guild) {
           await interaction.reply({
-            content: 'Use this in a server.',
+            content: 'استخدم هذا الزر داخل السيرفر.',
             ephemeral: true,
           });
+
           return;
         }
 
-        await interaction.deferReply({ ephemeral: true });
-
-        const name =
-          `support-${slugify(interaction.user.username).slice(0, 24)}`;
+        await interaction.deferReply({
+          ephemeral: true,
+        });
 
         let channel;
 
         try {
+          const username = slugify(
+            interaction.user.username
+          ).slice(0, 24);
+
           channel = await createPrivateChannel(
             interaction.guild,
-            name,
+            `support-${username}`,
             interaction.user.id
           );
 
@@ -314,35 +694,49 @@ startBot();
           await channel.send({
             content:
               `${interaction.user}` +
-              (STAFF_ROLE_ID ? ` <@&${STAFF_ROLE_ID}>` : ''),
+              (
+                STAFF_ROLE_ID
+                  ? ` <@&${STAFF_ROLE_ID}>`
+                  : ''
+              ),
+
             embeds: [
               new EmbedBuilder()
-                .setColor(0x168CFF)
+                .setColor(BLUE)
                 .setTitle('🎫 VENOM SUPPORT')
                 .setDescription(
-                  'Describe your question here. Staff will help you soon.'
+                  'اكتب مشكلتك هنا وسيساعدك فريق الإدارة.'
                 ),
             ],
+
             components: [row],
           });
+
         } catch (error) {
-          console.error('Support ticket creation error:', error);
+          console.error(
+            'Support ticket creation error:',
+            error
+          );
 
           if (channel) {
             await channel.delete().catch(() => {});
           }
 
           await interaction.editReply(
-            '❌ Could not create ticket. Check bot permissions.'
+            '❌ تعذّر إنشاء التذكرة. تحقق من صلاحيات البوت.'
           );
+
           return;
         }
 
         await interaction.editReply(
-          `✅ Support ticket created: ${channel}`
+          `✅ تم إنشاء تذكرة الدعم: ${channel}`
         );
+
         return;
       }
+
+      // ---------- CLOSE TICKET ----------
 
       if (
         interaction.customId === 'venom_close_ticket' ||
@@ -350,952 +744,130 @@ startBot();
       ) {
         if (!interaction.guild || !interaction.channel) {
           await interaction.reply({
-            content: 'Not available here.',
+            content: 'هذا الزر غير متاح هنا.',
             ephemeral: true,
           });
+
           return;
         }
 
-        const hasUserOverwrite =
+        const ownsTicket =
           interaction.channel.permissionOverwrites.cache.has(
             interaction.user.id
           );
 
-        if (!isStaff(interaction) && !hasUserOverwrite) {
+        if (!isStaff(interaction) && !ownsTicket) {
           await interaction.reply({
-            content: '❌ You cannot close this ticket.',
+            content: '❌ لا يمكنك إغلاق هذه التذكرة.',
             ephemeral: true,
           });
+
           return;
         }
 
         await interaction.reply({
-          content: '🔒 Ticket will be deleted in 5 seconds.',
+          content: '🔒 سيتم حذف التذكرة بعد 5 ثوانٍ.',
         });
 
         const channel = interaction.channel;
 
         setTimeout(() => {
-          channel.delete('VENOM ticket closed').catch(console.error);
+          channel.delete('VENOM ticket closed')
+            .catch(console.error);
         }, 5000);
 
         return;
       }
 
-      // ---------- PAYMENT CONFIRMATION ----------
+      // ---------- CONFIRM PAYMENT ----------
 
-      if (interaction.customId.startsWith('venom_paid_')) {
-        if (!isStaff(interaction)) {
-          await interaction.reply({
-            content: '❌ Only staff can confirm payment.',
-            ephemeral: true,
-          });
+      if (
+        interaction.customId.startsWith('venom_paid_')
+      ) {
+        if (!(await requireStaff(interaction))) {
           return;
         }
 
-        const parts = interaction.customId.split('_');
-        const customerId = parts.pop();
-        const quantity = Number(parts.pop());
-        const productId = parts.slice(2).join('_');
+        const match = interaction.customId.match(
+          /^venom_paid_(.+)_(\d+)_(\d{17,20})$/
+        );
+
+        if (!match) {
+          await interaction.reply({
+            content: '❌ بيانات الطلب غير صالحة.',
+            ephemeral: true,
+          });
+
+          return;
+        }
+
+        const productId = match[1];
+        const quantity = Number(match[2]);
+        const customerId = match[3];
 
         const product = products.get(productId);
 
         if (!product) {
           await interaction.reply({
-            content: '❌ Product not found.',
+            content: '❌ المنتج غير موجود.',
             ephemeral: true,
           });
+
           return;
         }
 
-        const currentEmbed = interaction.message.embeds[0];
-
         if (
-          !currentEmbed ||
+          !Number.isInteger(quantity) ||
+          quantity < 1
+        ) {
+          await interaction.reply({
+            content: '❌ الكمية غير صالحة.',
+            ephemeral: true,
+          });
+
+          return;
+        }
+
+        const currentEmbed =
+          interaction.message.embeds[0];
+
+        if (!currentEmbed) {
+          await interaction.reply({
+            content: '❌ بيانات الطلب غير موجودة.',
+            ephemeral: true,
+          });
+
+          return;
+        }
+
+        const alreadyPaid =
           currentEmbed.fields?.some(
             field =>
               field.name === '📌 Status' &&
               field.value.includes('Payment confirmed')
-          )
-        ) {
-          await interaction.reply({
-            content: '⚠️ This order has already been processed.',
-            ephemeral: true,
-          });
-          return;
-        }
+          );
 
-        if (!/^\d{17,20}$/.test(customerId)) {
+        if (alreadyPaid) {
           await interaction.reply({
-            content: '❌ Invalid customer ID.',
+            content: '⚠️ تمت معالجة هذا الطلب مسبقًا.',
             ephemeral: true,
           });
-          return;
-        }
 
-        if (!Number.isInteger(quantity) || quantity < 1) {
-          await interaction.reply({
-            content: '❌ Invalid quantity.',
-            ephemeral: true,
-          });
           return;
         }
 
         if (product.stock < quantity) {
           await interaction.reply({
-            content: `❌ Not enough stock. Current stock: ${product.stock}`,
+            content:
+              `❌ المخزون غير كافٍ. المتوفر: ${product.stock}`,
             ephemeral: true,
           });
+
           return;
         }
+
+        // Save inventory before confirming payment.
 
         const oldStock = product.stock;
-        product.stock -= quantity;
 
-        if (!saveProducts()) {
-          product.stock = oldStock;
-
-          await interaction.reply({
-            content: '❌ Could not save inventory changes.',
-            ephemeral: true,
-          });
-          return;
-        }
-
-        const updatedEmbed = EmbedBuilder.from(currentEmbed)
-          .setColor(0x2ECC71)
-          .spliceFields(5, 1, {
-            name: '📌 Status',
-            value: `✅ Payment confirmed by ${interaction.user.tag}`,
-          });
-
-        const disabledRows = interaction.message.components.map(row =>
-          new ActionRowBuilder().addComponents(
-            row.components.map(component =>
-              ButtonBuilder.from(component).setDisabled(true)
-            )
-          )
-        );
-
-        await interaction.update({
-          embeds: [updatedEmbed],
-          components: disabledRows,
-        });
-
-        try {
-          const customer = await client.users.fetch(customerId);
-
-          await customer.send({
-            embeds: [
-              new EmbedBuilder()
-                .setColor(0x2ECC71)
-                .setTitle('✅ VENOM SHOP — Payment Confirmed')
-                .setDescription(
-                  `Your payment has been confirmed!\n\n` +
-                  `📦 Product: **${product.name}**\n` +
-                  `🔢 Quantity: **${quantity}**\n` +
-                  `💰 Total: **${product.price * quantity}**\n` +
-                  `📦 Remaining stock: **${product.stock}**\n\n` +
-                  'Thank you for choosing VENOM SHOP.'
-                )
-                .setTimestamp(),
-            ],
-          });
-        } catch (error) {
-          console.warn(
-            `Could not DM customer ${customerId}:`,
-            error.message
-          );
-        }
-
-        return;
-      }
-    }
-
-    // ---------- PRODUCT SELECT MENUnents(),
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (i.customId === 'venom_open_support') {
-        if (!i.guild) {
-          await i.reply({ content: 'Use this in a server.', ephemeral: true });
-          return;
-        }
-
-        const name = `support-${slugify(i.user.username).slice(0, 24) || 'user'}`;
-        const channel = await createPrivateChannel(i.guild, name, i.user.id);
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId('venom_close_ticket')
-            .setLabel('Close ticket')
-            .setStyle(ButtonStyle.Danger),
-        );
-
-        await channel.send({
-          content: `${i.user}${STAFF_ROLE_ID ? ` <@&${STAFF_ROLE_ID}>` : ''}`,
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0x168CFF)
-              .setTitle('🎫 VENOM SUPPORT')
-              .setDescription('Describe your question here. Staff will help you soon.'),
-          ],
-          components: [row],
-        });
-
-        await i.reply({
-          content: `✅ Support ticket created: ${channel}`,
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (i.customId === 'venom_close_ticket' || i.customId === 'venom_close_order') {
-        if (!i.guild || !i.channel) {
-          await i.reply({ content: 'Not available here.', ephemeral: true });
-          return;
-        }
-
-        const allowed = isStaff(i) ||
-          i.channel.permissionOverwrites.cache.has(i.user.id);
-
-        if (!allowed) {
-          await i.reply({ content: '❌ You cannot close this ticket.', ephemeral: true });
-          return;
-        }
-
-        await i.reply({ content: '🔒 Ticket will be deleted in 5 seconds.' });
-        const channel = i.channel;
-        setTimeout(() => channel.delete('Ticket closed').catch(() => {}), 5000);
-        return;
-    }
-          
-      if (i.customId.startsWith('venom_paid_')) {
-        if (!isStaff(i)) {
-          await i.reply({ content: '❌ Only staff can confirm payment.', ephemeral: true });
-          return;
-        }
-
-        const parts = i.customId.split('_');
-        const customerId = parts.pop();
-        const quantity = Number(parts.pop());
-        const productId = parts.slice(2).join('_');
-        const p = products.get(productId);
-
-        if (!p) {
-          await i.reply({ content: '❌ Product not found.', ephemeral: true });
-          return;
-        }
-
-        if (!Number.isInteger(quantity) || quantity < 1) {
-          await i.reply({ content: '❌ Invalid quantity.', ephemeral: true });
-          return;
-        }
-
-        if (p.stock < quantity) {
-          await i.reply({
-            content: `❌ Not enough stock. Current stock: ${p.stock}`,
-            ephemeral: true,
-          });
-          return;
-        }
-
-        p.stock -= quantity;
-        saveProducts();
-
-        const embed = EmbedBuilder.from(i.message.embeds[0])
-          .setColor(0x2ECC71)
-          .spliceFields(5, 1, {
-            name: '📌 Status',
-            value: '✅ Payment confirmed',
-          });
-
-        await i.update({ embeds: [embed], components: [] });
-
-        try {
-          const customer = await client.users.fetch(customerId);
-          await customer.send(
-            `✅ Payment confirmed for your VENOM SHOP order.\n` +
-            `Product: ${p.name}\nQuantity: ${quantity}\nRemaining stock: ${p.stock}`
-          );
-        } catch {
-          console.warn(`Could not DM customer ${customerId}.`);
-        }
-        return;
-      }
-    }
-
-    if (i.isStringSelectMenu() && i.customId === 'venom_product_select') {
-      const id = i.values[0];
-      const p = products.get(id);
-
-      if (!p || p.stock < 1) {
-        await i.reply({
-          content: '❌ Out of stock. Refresh /shop and try again.',
-          ephemeral: true,
-        });
-        return;
-      }
-
-      const modal = new ModalBuilder()
-        .setCustomId(`venom_quantity_${id}`)
-        .setTitle('Choose quantity');
-
-      const input = new TextInputBuilder()
-        .setCustomId('quantity')
-        .setLabel(`Quantity (stock: ${p.stock})`)
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('1')
-        .setRequired(true)
-        .setMinLength(1)
-        .setMaxLength(4);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      await i.showModal(modal);
-      return;
-    }
-
-    if (i.isModalSubmit() && i.customId.startsWith('venom_quantity_')) {
-      const id = i.customId.slice('venom_quantity_'.length);
-      const p = products.get(id);
-      const quantity = Number(i.fields.getTextInputValue('quantity'));
-
-      if (!p) {
-        await i.reply({ content: '❌ Product not found.', ephemeral: true });
-        return;
-      }
-
-      if (!Number.isInteger(quantity) || quantity < 1 || quantity > p.stock) {
-        await i.reply({
-          content: `❌ Enter a whole number from 1 to ${p.stock}.`,
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (!i.guild) {
-        await i.reply({ content: 'Place orders inside the Discord server.', ephemeral: true });
-        return;
-      }
-
-      await i.deferReply({ ephemeral: true });
-
-      let ticket;
-      try {
-        ticket = await createPrivateChannel(
-          i.guild,
-          `order-${slugify(i.user.username).slice(0, 20) || 'user'}`,
-          i.user.id
-        );
-      } catch (e) {
-        console.error('Could not create order channel:', e);
-        await i.editReply('❌ Could not create order ticket. Check bot permissions.');
-        return;
-      }
-
-      const total = p.price * quantity;
-      const embed = new EmbedBuilder()
-        .setColor(0x168CFF)
-        .setTitle('📦 VENOM SHOP — ORDER')
-        .addFields(
-          { name: '👤 Customer', value: `<@${i.user.id}>` },
-          { name: '🛒 Product', value: p.name },
-          { name: '🔢 Quantity', value: String(quantity), inline: true },
-          { name: '💰 Unit price', value: String(p.price), inline: true },
-          { name: '💳 Total', value: `**${total}**`, inline: true },
-          { name: '📌 Status', value: '⏳ Waiting for staff to confirm payment' },
-        )
-        .setFooter({ text: `Product ID: ${id} | Customer ID: ${i.user.id}` });
-
-      if (p.image) embed.setThumbnail(p.image);
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`venom_paid_${id}_${quantity}_${i.user.id}`)
-          .setLabel('Confirm payment')
-          .setStyle(ButtonStyle.Success),
-        new ButtonBuilder()
-          .setCustomId('venom_close_order')
-          .setLabel('Close ticket')
-          .setStyle(ButtonStyle.Secondary),
-      );
-
-      await ticket.send({
-        content: `${i.user}${STAFF_ROLE_ID ? ` <@&${STAFF_ROLE_ID}>` : ''}`,
-        embeds: [embed],
-        components: [row],
-      });
-
-      try {
-        await i.user.send(
-          `🛒 Your VENOM SHOP order was created.\n` +
-          `Product: ${p.name}\nQuantity: ${quantity}\nTotal: ${total}\nTicket: ${ticket.name}`
-        );
-      } catch {
-        console.warn(`Could not DM customer ${i.user.id}.`);
-      }
-
-      await i.editReply(`✅ Your order ticket has been created: ${ticket}`);
-      return;
-    }
-  } catch (error) {
-    console.error('Interaction error:', error);
-    const message = '❌ Something went wrong. Check Railway logs and bot permissions.';
-
-    try {
-      if (i.deferred || i.replied) {
-        await i.followUp({ content: message, ephemeral: true });
-      } else {
-        await i.reply({ content: message, ephemeral: true });
-      }
-    } catch {}
-  }
-});
-
-client.once('ready', () => {
-  console.log(`VENOM SHOP online as ${client.user.tag}`);
-});
-
-(async () => {
-  try {
-    await registerCommands();
-    await client.login(TOKEN);
-  } catch (error) {
-    console.error('Startup error:', error);
-    process.exit(1);
-  }
-})();
-      ctMatch = channel.topic?.match(/VENOM_PRODUCT=([^;]+)/);
-
-      if (!ownerMatch || !productMatch) {
-        return interaction.reply({
-          content: "❌ معلومات الطلب غير موجودة في موضوع التذكرة.",
-          ephemeral: true
-        });
-      }
-
-      const ownerId = ownerMatch[1];
-      const product = products.find(p => p.id === productMatch[1]);
-
-      if (!product) {
-        return interaction.reply({
-          content: "❌ المنتج غير موجود في المخزون الحالي.",
-          ephemeral: true
-        });
-      }
-
-      if (product.stock < 1) {
-        return interaction.reply({
-          content: "❌ المخزون فارغ. لا يمكن تأكيد هذا الطلب.",
-          ephemeral: true
-        });
-      }
-
-      product.stock -= 1;
-      saveProducts();
-
-      await channel.setTopic(
-  (channel.topic || "").replace(
-    "VENOM_PAID=0",
-    "VENOM_PAID=1"
-  )
-);
-      );
-
-      const oldEmbed = interaction.message.embeds[0];
-      const updatedEmbed = EmbedBuilder.from(oldEmbed)
-        .setColor(0x00cc66)
-        .addFields({
-          name: "✅ حالة الدفع",
-          value: `تم التأكيد بواسطة ${interaction.user}`,
-          inline: false
-        });
-
-      const disabledRows = interaction.message.components.map(row =>
-        new ActionRowBuilder().addComponents(
-          row.components.map(component =>
-            ButtonBuilder.from(component).setDisabled(true)
-          )
-        )
-      );
-
-      await interaction.update({
-        embeds: [updatedEmbed],
-        components: disabledRows
-      });
-
-      try {
-        const buyer = await client.users.fetch(ownerId);
-        await buyer.send({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(0x00cc66)
-              .setTitle("✅ VENOM SHOP — تم تأكيد الدفع")
-              .setDescription(
-                `تم تأكيد دفع طلبك بنجاح!\n\n` +
-                `📦 المنتج: **${product.name}**\n` +
-                `💰 السعر: **${product.price}**\n` +
-                `📦 المخزون المتبقي: **${product.stock}**\n\n` +
-                "شكرًا لثقتك في VENOM SHOP."
-              )
-              .setTimestamp()
-          ]
-        });
-      } catch (error) {
-        console.log("Payment DM unavailable:", error.message);
-      }
-
-      return;
-    }
-
-    // Close ticket
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith("venom_close_")
-    ) {
-      const channel = interaction.channel;
-      const ownerMatch = channel?.topic?.match(/VENOM_OWNER=(\d+)/);
-      const isOwner = ownerMatch?.[1] === interaction.user.id;
-
-      if (!isStaff(interaction) && !isOwner) {
-        return interaction.reply({
-          content: "❌ فقط صاحب التذكرة أو الإدارة يقدر يغلقها.",
-          ephemeral: true
-        });
-      }
-
-      await interaction.reply({
-        content: "🔒 سيتم إغلاق التذكرة بعد لحظات.",
-        ephemeral: true
-      });
-
-      setTimeout(() => {
-        channel?.delete("VENOM SHOP ticket closed").catch(console.error);
-      }, 3000);
-    }
-  } catch (error) {
-    console.error("Interaction error:", error);
-
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: "❌ وقع خطأ. تفقّد Railway Logs.",
-        ephemeral: true
-      }).catch(() => {});
-    } else if (interaction.isRepliable() && interaction.deferred) {
-      await interaction.editReply("❌ وقع خطأ. تفقّد Railway Logs.").catch(() => {});
-    }
-  }
-});
-
-client.login(TOKEN);
-
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-  const route = GUILD_ID
-    ? Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID)
-    : Routes.applicationCommands(CLIENT_ID);
-
-  await rest.put(route, { body: commands });
-  console.log('VENOM SHOP commands registered!');
-}
-
-client.once('ready', () => {
-  console.log(`VENOM SHOP Online: ${client.user.tag}`);
-});
-
-client.on('interactionCreate', async interaction => {
-  try {
-    // Publish shop panel
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === 'ticketpanel'
-    ) {
-      const embed = new EmbedBuilder()
-        .setColor(0x168CFF)
-        .setTitle('🛒 SHOP & SUPPORT')
-        .setDescription(
-          'Bienvenue dans VENOM SHOP !\n\n' +
-          '🛒 Cliquez sur GO TO SHOP pour voir les produits.\n' +
-          '💳 Choisissez votre produit et la quantité.\n' +
-          '🎫 Un ticket privé sera créé pour votre commande.\n\n' +
-          'Respectez le staff et évitez le spam.'
-        )
-        .setFooter({ text: 'VENOM SHOP • Support & Orders' });
-
-      await interaction.reply({
-        embeds: [embed],
-        components: shopComponents()
-      });
-      return;
-    }
-
-    // Show shop
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === 'shop'
-    ) {
-      await interaction.reply({
-        embeds: [makeShopEmbed()],
-        components: shopComponents(),
-        ephemeral: true
-      });
-      return;
-    }
-
-    // Add product
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === 'addproduct'
-    ) {
-      const name = interaction.options.getString('name', true);
-      const price = interaction.options.getNumber('price', true);
-      const stock = interaction.options.getInteger('stock', true);
-
-      const id = name.toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-|-$/g, '')
-        .slice(0, 80) || `product-${Date.now()}`;
-
-      if (products.has(id)) {
-        await interaction.reply({
-          content: `هذا المنتج موجود مسبقًا: ${id}`,
-          ephemeral: true
-        });
-        return;
-      }
-
-      products.set(id, {
-        name,
-        price,
-        stock,
-        image: ''
-      });
-
-      await interaction.reply({
-        content: `✅ تمت إضافة المنتج: ${name}\nID: ${id}`,
-        ephemeral: true
-      });
-      return;
-    }
-
-    // Update stock
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === 'setstock'
-    ) {
-      const id = interaction.options.getString('product_id', true);
-      const quantity = interaction.options.getInteger('quantity', true);
-      const product = products.get(id);
-
-      if (!product) {
-        await interaction.reply({
-          content: '❌ المنتج غير موجود. تحقق من ID.',
-          ephemeral: true
-        });
-        return;
-      }
-
-      product.stock = quantity;
-
-      await interaction.reply({
-        content: `✅ مخزون ${product.name}: ${quantity}`,
-        ephemeral: true
-      });
-      return;
-    }
-
-    // Remove product
-    if (
-      interaction.isChatInputCommand() &&
-      interaction.commandName === 'removeproduct'
-    ) {
-      const id = interaction.options.getString('product_id', true);
-
-      if (!products.has(id)) {
-        await interaction.reply({
-          content: '❌ المنتج غير موجود.',
-          ephemeral: true
-        });
-        return;
-      }
-
-      const name = products.get(id).name;
-      products.delete(id);
-
-      await interaction.reply({
-        content: `🗑️ تم حذف ${name}`,
-        ephemeral: true
-      });
-      return;
-    }
-
-    // Refresh shop buttons
-    if (
-      interaction.isButton() &&
-      [
-        'venom_shop_refresh',
-        'venom_shop_prices'
-      ].includes(interaction.customId)
-    ) {
-      await interaction.reply({
-        embeds: [makeShopEmbed()],
-        components: shopComponents(),
-        ephemeral: true
-      });
-      return;
-    }
-
-    // Product selection
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId === 'venom_product_select'
-    ) {
-      const id = interaction.values[0];
-      const product = products.get(id);
-
-      if (!product || product.stock < 1) {
-        await interaction.reply({
-          content: '❌ هذا المنتج غير متوفر.',
-          ephemeral: true
-        });
-        return;
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(0x168CFF)
-        .setTitle(`🛒 ${product.name}`)
-        .setDescription(
-          `السعر: **${product.price}**\n` +
-          `المخزون: **${product.stock}**\n\n` +
-          'اضغط على الزر لاختيار الكمية.'
-        );
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`venom_order_${id}`)
-          .setLabel('🛒 Commander / Order')
-          .setStyle(ButtonStyle.Success)
-      );
-
-      await interaction.reply({
-        embeds: [embed],
-        components: [row],
-        ephemeral: true
-      });
-      return;
-    }
-  } catch (error) {
-    console.error(error);
-
-    if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({
-        content: '❌ حدث خطأ. راجع سجلات Railway.',
-        ephemeral: true
-      }).catch(() => {});
-    }
-  }
-});
-
-registerCommands()
-  .then(() => client.login(TOKEN))
-  .catch(error => {
-    console.error('Startup error:', error);
-    process.exit(1);
-  });
-        
-
-    // Order button: ask the customer for quantity
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith('venom_order_')
-    ) {
-      const productId = interaction.customId.slice(
-        'venom_order_'.length
-      );
-
-      const product = products.get(productId);
-
-      if (!product || product.stock < 1) {
-        await interaction.reply({
-          content: '❌ المنتج غير متوفر.',
-          ephemeral: true
-        });
-        return;
-      }
-
-      const modal = new ModalBuilder()
-        .setCustomId(`venom_quantity_${productId}`)
-        .setTitle('اختيار الكمية');
-
-      const quantityInput = new TextInputBuilder()
-        .setCustomId('quantity')
-        .setLabel('كم قطعة تريد؟')
-        .setPlaceholder('مثال: 2')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setMaxLength(5);
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(quantityInput)
-      );
-
-      await interaction.showModal(modal);
-      return;
-    }
-
-    // Process the selected quantity and create a private order ticket
-    if (
-      interaction.isModalSubmit() &&
-      interaction.customId.startsWith('venom_quantity_')
-    ) {
-      const productId = interaction.customId.slice(
-        'venom_quantity_'.length
-      );
-
-      const product = products.get(productId);
-      const quantity = Number(
-        interaction.fields.getTextInputValue('quantity')
-      );
-
-      if (!product) {
-        await interaction.reply({
-          content: '❌ المنتج غير موجود.',
-          ephemeral: true
-        });
-        return;
-      }
-
-      if (
-        !Number.isInteger(quantity) ||
-        quantity < 1 ||
-        quantity > product.stock
-      ) {
-        await interaction.reply({
-          content: `❌ الكمية غير صحيحة. المخزون المتاح: ${product.stock}`,
-          ephemeral: true
-        });
-        return;
-      }
-
-      const guild = interaction.guild;
-
-      if (!guild) {
-        await interaction.reply({
-          content: 'يجب طلب المنتج من داخل السيرفر.',
-          ephemeral: true
-        });
-        return;
-      }
-
-      const total = product.price * quantity;
-      const safeName = interaction.user.username
-        .toLowerCase()
-        .replace(/[^a-z0-9-]/g, '')
-        .slice(0, 20) || 'client';
-
-      const permissions = [
-        {
-          id: guild.roles.everyone.id,
-          deny: [PermissionFlagsBits.ViewChannel]
-        },
-        {
-          id: interaction.user.id,
-          allow: [
-            PermissionFlagsBits.ViewChannel,
-            PermissionFlagsBits.SendMessages,
-            PermissionFlagsBits.ReadMessageHistory
-          ]
-        }
-      ];
-
-      if (STAFF_ROLE_ID) {
-        const staffRole = guild.roles.cache.get(STAFF_ROLE_ID);
-
-        if (staffRole) {
-          permissions.push({
-            id: staffRole.id,
-            allow: [
-              PermissionFlagsBits.ViewChannel,
-              PermissionFlagsBits.SendMessages,
-              PermissionFlagsBits.ReadMessageHistory
-            ]
-          });
-        }
-      }
-
-      const ticket = await guild.channels.create({
-        name: `order-${safeName}-${Date.now().toString().slice(-4)}`,
-        type: ChannelType.GuildText,
-        permissionOverwrites: permissions,
-        reason: 'VENOM SHOP customer order'
-      });
-
-      const embed = new EmbedBuilder()
-        .setColor(0x168CFF)
-        .setTitle('📦 VENOM SHOP — ORDER')
-        .addFields(
-          {
-            name: '👤 الزبون',
-            value: `<@${interaction.user.id}>`
-          },
-          {
-            name: '🛒 المنتج',
-            value: product.name
-          },
-          {
-            name: '🔢 الكمية',
-            value: String(quantity),
-            inline: true
-          },
-          {
-            name: '💰 سعر القطعة',
-            value: String(product.price),
-            inline: true
-          },
-          {
-            name: '💳 المجموع',
-            value: `**${total}**`,
-            inline: true
-          },
-          {
-            name: '📌 الحالة',
-            value: 'في انتظار تأكيد الدفع'
-          }
-        )
-        .setFooter({
-          text: `Product ID: ${productId}`
-        });
-
-      const buttons = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(
-            `venom_paid_${productId}_${quantity}_${interaction.user.id}`
-          )
-          .setLabel('تأكيد الدفع')
-          .setStyle(ButtonStyle.Success),
-
-        new ButtonBuilder()
-          .setCustomId('venom_close_order')
-          .setLabel('إغلاق التذكرة')
-          .setStyle(ButtonStyle.Secondary)
-      );
-
-      await ticket.send({
-        content: STAFF_ROLE_ID
-          ? `<@${interaction.user.id}> <@&${STAFF_ROLE_ID}>`
-          : `<@${interaction.user.id}>`,
-        embeds: [embed],
-        components: [buttons]
-      });
-
-      await interaction.reply({
-        content: `✅ تم إنشاء تذكرة طلبك: ${ticket}`,
-        ephemeral: true
-      });
-
-      return;
-            }
-            
+   
