@@ -10,351 +10,169 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   ChannelType,
-  PermissionFlagsBits,
-  Events
-} = require("discord.js");
-
-const fs = require("node:fs");
-const path = require("node:path");
+  PermissionFlagsBits
+} = require('discord.js');
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const GUILD_ID = "1556066421757317130";
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || "";
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID = process.env.GUILD_ID;
+const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID;
 
-if (!TOKEN) {
-  throw new Error("Missing DISCORD_TOKEN in Railway Variables");
+if (!TOKEN || !CLIENT_ID) {
+  console.error('Missing DISCORD_TOKEN or CLIENT_ID');
+  process.exit(1);
 }
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const DATA_FILE = path.join(__dirname, "products.json");
-let products = [];
-let nextOrderId = 1;
+const products = new Map([
+  ['kit-blue-laptop', {
+    name: 'Electronic Kit + Blue Laptop',
+    price: 100,
+    stock: 10,
+    image: ''
+  }],
+  ['advanced-decry', {
+    name: 'Advanced Decry + Plasma Cutter',
+    price: 150,
+    stock: 8,
+    image: ''
+  }],
+  ['thermite-c4', {
+    name: 'Thermite + C4 Charge + BasicDecrypter',
+    price: 200,
+    stock: 5,
+    image: ''
+  }],
+  ['lighter-drill', {
+    name: 'Lighter + Security Card A + Large Drill',
+    price: 75,
+    stock: 12,
+    image: ''
+  }]
+]);
 
-function loadProducts() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      products = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    }
-  } catch (error) {
-    console.error("Cannot load products:", error);
-    products = [];
-  }
-}
+const commands = [
+  new SlashCommandBuilder()
+    .setName('ticketpanel')
+    .setDescription('Publish the shop panel'),
 
-function saveProducts() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(products, null, 2));
-}
+  new SlashCommandBuilder()
+    .setName('shop')
+    .setDescription('View available products'),
 
-function isStaff(interaction) {
-  if (!interaction.inGuild()) return false;
+  new SlashCommandBuilder()
+    .setName('addproduct')
+    .setDescription('Add a product')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption(o =>
+      o.setName('name')
+        .setDescription('Product name')
+        .setRequired(true))
+    .addNumberOption(o =>
+      o.setName('price')
+        .setDescription('Product price')
+        .setRequired(true)
+        .setMinValue(0))
+    .addIntegerOption(o =>
+      o.setName('stock')
+        .setDescription('Available stock')
+        .setRequired(true)
+        .setMinValue(0)),
 
-  const member = interaction.member;
+  new SlashCommandBuilder()
+    .setName('setstock')
+    .setDescription('Update product stock')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption(o =>
+      o.setName('product_id')
+        .setDescription('Product ID')
+        .setRequired(true))
+    .addIntegerOption(o =>
+      o.setName('quantity')
+        .setDescription('New quantity')
+        .setRequired(true)
+        .setMinValue(0)),
 
-  return (
-    member.permissions?.has(PermissionFlagsBits.ManageGuild) ||
-    member.permissions?.has(PermissionFlagsBits.ManageChannels) ||
-    (STAFF_ROLE_ID && member.roles?.cache?.has(STAFF_ROLE_ID))
-  );
-}
+  new SlashCommandBuilder()
+    .setName('removeproduct')
+    .setDescription('Remove a product')
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+    .addStringOption(o =>
+      o.setName('product_id')
+        .setDescription('Product ID')
+        .setRequired(true))
+].map(command => command.toJSON());
 
 function makeShopEmbed() {
   const embed = new EmbedBuilder()
-    .setColor(0x008cff)
-    .setTitle("☠️ VENOM SHOP")
+    .setColor(0x168CFF)
+    .setTitle('🛒 VENOM SHOP')
     .setDescription(
-      products.length
-        ? "اختار المنتج من القائمة لتشوف التفاصيل وتقدر تشريه."
-        : "المتجر فارغ حاليًا. الإدارة تقدر تضيف منتجات باستعمال /addproduct."
-    )
-    .setFooter({ text: "VENOM SHOP • Secure Orders" })
-    .setTimestamp();
+      'Welcome to VENOM SHOP!\n' +
+      'Choose a product, select the quantity, ' +
+      'and confirm your order.'
+    );
 
-  for (const product of products.slice(0, 15)) {
+  for (const [id, product] of products) {
     embed.addFields({
-      name: `${product.name} — ${product.price}`,
+      name: product.name,
       value:
-        `${product.description}\n` +
-        `📦 المخزون: ${product.stock}\n` +
-        `🗂️ الفئة: ${product.category}`,
-      inline: false
+        `Price: **${product.price}**\n` +
+        `Stock: **${product.stock}**\n` +
+        `ID: \`${id}\``
     });
-  }
-
-  const banner = process.env.SHOP_BANNER_URL;
-  if (banner && /^https?:\/\/\S+$/i.test(banner)) {
-    embed.setImage(banner);
   }
 
   return embed;
 }
 
-const commands = [
-  new SlashCommandBuilder()
-    .setName("shop")
-    .setDescription("عرض متجر VENOM SHOP"),
+function shopComponents() {
+  const available = [...products.entries()]
+    .filter(([, product]) => product.stock > 0)
+    .slice(0, 25);
 
-  new SlashCommandBuilder()
-    .setName("addproduct")
-    .setDescription("إضافة منتج جديد")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption(option =>
-      option.setName("name")
-        .setDescription("اسم المنتج")
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option.setName("price")
-        .setDescription("سعر المنتج")
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option.setName("description")
-        .setDescription("وصف المنتج")
-        .setRequired(true)
-    )
-    .addIntegerOption(option =>
-      option.setName("stock")
-        .setDescription("كمية المخزون")
-        .setRequired(true)
-        .setMinValue(0)
-    )
-    .addStringOption(option =>
-      option.setName("category")
-        .setDescription("فئة المنتج")
-        .setRequired(false)
-    )
-    .addStringOption(option =>
-      option.setName("image")
-        .setDescription("رابط صورة المنتج (اختياري)")
-        .setRequired(false)
-    ),
+  const rows = [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('venom_shop_refresh')
+        .setLabel('🛒 GO TO SHOP')
+        .setStyle(ButtonStyle.Primary),
 
-  new SlashCommandBuilder()
-    .setName("setstock")
-    .setDescription("تعديل مخزون منتج")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption(option =>
-      option.setName("name")
-        .setDescription("اسم المنتج")
-        .setRequired(true)
+      new ButtonBuilder()
+        .setCustomId('venom_shop_prices')
+        .setLabel('💸 CHECK PRIX')
+        .setStyle(ButtonStyle.Secondary)
     )
-    .addIntegerOption(option =>
-      option.setName("quantity")
-        .setDescription("الكمية الجديدة")
-        .setRequired(true)
-        .setMinValue(0)
-    ),
+  ];
 
-  new SlashCommandBuilder()
-    .setName("removeproduct")
-    .setDescription("حذف منتج")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption(option =>
-      option.setName("name")
-        .setDescription("اسم المنتج")
-        .setRequired(true)
-    )
-].map(command => command.toJSON());
+  if (available.length) {
+    const select = new StringSelectMenuBuilder()
+      .setCustomId('venom_product_select')
+      .setPlaceholder('Choose a product')
+      .addOptions(
+        available.map(([id, product]) => ({
+          label: product.name.slice(0, 100),
+          description:
+            `Price: ${product.price} | Stock: ${product.stock}`,
+          value: id
+        }))
+      );
 
-client.once(Events.ClientReady, async readyClient => {
-  console.log(`VENOM SHOP online: ${readyClient.user.tag}`);
-  loadProducts();
-
-  try {
-    const rest = new REST({ version: "10" }).setToken(TOKEN);
-
-    await rest.put(
-      Routes.applicationGuildCommands(
-        readyClient.user.id,
-        GUILD_ID
-      ),
-      { body: commands }
+    rows.push(
+      new ActionRowBuilder().addComponents(select)
     );
-
-    console.log("VENOM SHOP commands registered!");
-  } catch (error) {
-    console.error("Command registration failed:", error);
   }
-});
 
-client.on(Events.InteractionCreate, async interaction => {
-  try {
-    // Slash commands
-    if (interaction.isChatInputCommand()) {
-      if (interaction.commandName === "shop") {
-        const rows = [];
-
-        if (products.length) {
-          const menu = new StringSelectMenuBuilder()
-            .setCustomId("venom_select_product")
-            .setPlaceholder("اختار منتجًا للشراء")
-            .addOptions(
-              products.slice(0, 25).map(product => ({
-                label: product.name.slice(0, 100),
-                description: `${product.price} • Stock: ${product.stock}`.slice(0, 100),
-                value: product.id
-              }))
-            );
-
-          rows.push(new ActionRowBuilder().addComponents(menu));
-        }
-
-        return interaction.reply({
-          embeds: [makeShopEmbed()],
-          components: rows
-        });
-      }
-
-      if (interaction.commandName === "addproduct") {
-        if (!isStaff(interaction)) {
-          return interaction.reply({
-            content: "❌ هذا الأمر للإدارة فقط.",
-            ephemeral: true
-          });
-        }
-
-        if (products.length >= 25) {
-          return interaction.reply({
-            content: "وصلت للحد الأقصى للمنتجات (25).",
-            ephemeral: true
-          });
-        }
-
-        const name = interaction.options.getString("name", true).trim();
-        const price = interaction.options.getString("price", true).trim();
-        const description = interaction.options.getString("description", true).trim();
-        const stock = interaction.options.getInteger("stock", true);
-        const category = interaction.options.getString("category") || "عام";
-        const image = interaction.options.getString("image");
-        
-        if (name.length > 100 || description.length > 1000 || price.length > 100) {
-          return interaction.reply({
-            content: "❌ الاسم أو الوصف أو السعر طويل جدًا.",
-            ephemeral: true
-          });
-        }
-
-        if (image && !/^https?:\/\/\S+$/i.test(image)) {
-          return interaction.reply({
-            content: "❌ رابط الصورة لازم يبدأ بـ http:// أو https://",
-            ephemeral: true
-          });
-        }
-
-        const product = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          name,
-          price,
-          description,
-          stock,
-          category,
-          image: image || ""
-        };
-
-        products.push(product);
-        saveProducts();
-
-        const embed = new EmbedBuilder()
-          .setColor(0x008cff)
-          .setTitle(`✅ تمت إضافة ${product.name}`)
-          .setDescription(product.description)
-          .addFields(
-            { name: "💰 السعر", value: product.price, inline: true },
-            { name: "📦 المخزون", value: String(product.stock), inline: true },
-            { name: "🗂️ الفئة", value: product.category, inline: true }
-          );
-
-        if (product.image) embed.setImage(product.image);
-
-        return interaction.reply({ embeds: [embed], ephemeral: true });
-      }
-
-      if (interaction.commandName === "setstock") {
-        if (!isStaff(interaction)) {
-          return interaction.reply({
-            content: "❌ هذا الأمر للإدارة فقط.",
-            ephemeral: true
-          });
-        }
-
-        const name = interaction.options.getString("name", true);
-        const quantity = interaction.options.getInteger("quantity", true);
-        const product = products.find(
-          p => p.name.toLowerCase() === name.toLowerCase()
-        );
-
-        if (!product) {
-          return interaction.reply({
-            content: "❌ لم أجد هذا المنتج. تأكد من الاسم.",
-            ephemeral: true
-          });
-        }
-
-        product.stock = quantity;
-        saveProducts();
-
-        return interaction.reply({
-          content: `✅ مخزون **${product.name}** أصبح ${quantity}.`,
-          ephemeral: true
-        });
-      }
-
-      if (interaction.commandName === "removeproduct") {
-        if (!isStaff(interaction)) {
-          return interaction.reply({
-            content: "❌ هذا الأمر للإدارة فقط.",
-            ephemeral: true
-          });
-        }
-
-        const name = interaction.options.getString("name", true);
-        const index = products.findIndex(
-          p => p.name.toLowerCase() === name.toLowerCase()
-        );
-
-        if (index === -1) {
-          return interaction.reply({
-            content: "❌ لم أجد هذا المنتج.",
-            ephemeral: true
-          });
-        }
-
-        const removed = products.splice(index, 1)[0];
-        saveProducts();
-
-        return interaction.reply({
-          content: `🗑️ تم حذف المنتج **${removed.name}**.`,
-          ephemeral: true
-        });
-      }
-    }
-
-    // Product selection
-    if (
-      interaction.isStringSelectMenu() &&
-      interaction.customId === "venom_select_product"
-    ) {
-      const product = products.find(p => p.id === interaction.values[0]);
-
-      if (!product) {
-        return interaction.reply({
-          content: "❌ هذا المنتج لم يعد موجودًا.",
-          ephemeral: true
-        });
-      }
-
-      const embed = new EmbedBuilder()
-        .setColor(0x008cff)
-        .setTitle(`🛒 ${product.name}`)
-        .setDescription(product.description)
-        .addFields(
-          { name: "💰 السعر", value: product.price, inline: true },
-          { name: "📦 المخزون", value: String(product.stock), inline: true },
-          { name: "🗂️ الفئة", value: product.category, inline: true }
+  return rows;
+}
+e: "🗂️ الفئة", value: product.category, inline: true }
         );
 
       if (product.image) embed.setImage(product.image);
