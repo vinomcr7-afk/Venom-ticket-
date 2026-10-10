@@ -2,15 +2,20 @@
 const {
   Client,
   GatewayIntentBits,
+  Events,
   EmbedBuilder,
-  Events
+  REST,
+  Routes,
+  SlashCommandBuilder
 } = require('discord.js');
 
 const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+
 const RED = 0xE50914;
 
-if (!TOKEN) {
-  console.error('❌ TOKEN is missing in Railway Variables.');
+if (!TOKEN || !CLIENT_ID) {
+  console.error('Missing TOKEN or CLIENT_ID in Railway Variables.');
   process.exit(1);
 }
 
@@ -18,8 +23,26 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
+const commands = [
+  new SlashCommandBuilder()
+    .setName('shop')
+    .setDescription('Open the VENOM SHOP')
+    .toJSON()
+];
+
+async function registerCommands() {
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
+
+  await rest.put(
+    Routes.applicationCommands(CLIENT_ID),
+    { body: commands }
+  );
+
+  console.log('Slash commands registered.');
+}
+
 client.once(Events.ClientReady, (readyClient) => {
-  console.log(`🔴 VENOM SHOP online as ${readyClient.user.tag}`);
+  console.log(`VENOM SHOP online as ${readyClient.user.tag}`);
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
@@ -32,11 +55,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         .setTitle('🔴 VENOM SHOP')
         .setDescription(
           'Welcome to VENOM SHOP!\n\n' +
-          '🛒 Browse our products\n' +
-          '🎫 Open a ticket for assistance\n' +
-          '💳 Contact staff for payment information'
+          '🛒 Products and offers\n' +
+          '🎫 Contact staff for support\n' +
+          '💳 Contact staff for payment details'
         )
-        .setFooter({ text: 'VENOM SHOP • Official Store' });
+        .setFooter({
+          text: 'VENOM SHOP | Official Store'
+        });
 
       await interaction.reply({
         embeds: [embed],
@@ -46,9 +71,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
   } catch (error) {
     console.error('Interaction error:', error);
 
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+    if (
+      interaction.isRepliable() &&
+      !interaction.replied &&
+      !interaction.deferred
+    ) {
       await interaction.reply({
-        content: '❌ An error occurred. Please contact staff.',
+        content: 'An error occurred. Please contact staff.',
         ephemeral: true
       }).catch(console.error);
     }
@@ -57,6 +86,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
 async function startBot() {
   try {
+    await registerCommands();
     await client.login(TOKEN);
   } catch (error) {
     console.error('Startup error:', error);
@@ -65,291 +95,7 @@ async function startBot() {
 }
 
 startBot();
-e === 'setstock') {
-          const id = i.options.getString('product_id', true);
-          const quantity = i.options.getInteger('quantity', true);
-          const p = products.get(id);
-
-          if (!p) {
-            await i.reply({ content: '❌ Product not found.', ephemeral: true });
-            return;
-          }
-
-          const previous = p.stock;
-          p.stock = quantity;
-
-          if (!saveProducts()) {
-            p.stock = previous;
-            await i.reply({ content: '❌ Could not save stock.', ephemeral: true });
-            return;
-          }
-
-          await i.reply({
-            content: `✅ Stock for **${p.name}**: ${quantity}`,
-            ephemeral: true,
-          });
-          return;
-        }
-
-        const id = i.options.getString('product_id', true);
-        const p = products.get(id);
-
-        if (!p) {
-          await i.reply({ content: '❌ Product not found.', ephemeral: true });
-          return;
-        }
-
-        products.delete(id);
-
-        if (!saveProducts()) {
-          products.set(id, p);
-          await i.reply({ content: '❌ Could not save changes.', ephemeral: true });
-          return;
-        }
-
-        await i.reply({ content: `✅ Removed **${p.name}**.`, ephemeral: true });
-        return;
-      }
-    }
-
-    // BUTTONS
-
-    if (i.isButton()) {
-      if (i.customId === 'venom_open_shop') {
-        await i.reply({
-          embeds: [shopEmbed()],
-          components: shopComponents(),
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (i.customId === 'venom_open_support') {
-        if (!i.guild) {
-          await i.reply({ content: 'Use this in a server.', ephemeral: true });
-          return;
-        }
-
-        await i.deferReply({ ephemeral: true });
-
-        let ticket;
-
-        try {
-          ticket = await createPrivateChannel(
-            i.guild,
-            `support-${slugify(i.user.username).slice(0, 24)}`,
-            i.user.id
-          );
-
-          const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId('venom_close_ticket')
-              .setLabel('Close ticket')
-              .setStyle(ButtonStyle.Danger)
-          );
-
-          await ticket.send({
-            content: `${i.user}${STAFF_ROLE_ID ? ` <@&${STAFF_ROLE_ID}>` : ''}`,
-            embeds: [
-              new EmbedBuilder()
-                .setColor(RED)
-                .setTitle('🎫 VENOM SUPPORT')
-                .setDescription('Describe your question here.'),
-            ],
-            components: [row],
-          });
-        } catch (error) {
-          console.error('Support ticket error:', error);
-          if (ticket) await ticket.delete().catch(() => {});
-          await i.editReply('❌ Could not create ticket. Check bot permissions.');
-          return;
-        }
-
-        await i.editReply(`✅ Support ticket created: ${ticket}`);
-        return;
-      }
-
-      if (i.customId === 'venom_close_ticket' || i.customId === 'venom_close_order') {
-        if (!i.guild || !i.channel) {
-          await i.reply({ content: 'Not available here.', ephemeral: true });
-          return;
-        }
-
-        const hasAccess = i.channel.permissionOverwrites.cache.has(i.user.id);
-
-        if (!isStaff(i) && !hasAccess) {
-          await i.reply({ content: '❌ You cannot close this ticket.', ephemeral: true });
-          return;
-        }
-
-        await i.reply({ content: '🔒 Ticket will be deleted in 5 seconds.' });
-
-        const channel = i.channel;
-        setTimeout(() => {
-          channel.delete('VENOM ticket closed').catch(console.error);
-        }, 5000);
-
-        return;
-      }
-
-      // PAYMENT CONFIRMATION
-
-      if (i.customId.startsWith('venom_paid_')) {
-        if (!isStaff(i)) {
-          await i.reply({ content: '❌ Only staff can confirm payment.', ephemeral: true });
-          return;
-        }
-
-        const parts = i.customId.split('_');
-        const customerId = parts.pop();
-        const quantity = Number(parts.pop());
-        const productId = parts.slice(2).join('_');
-        const p = products.get(productId);
-
-        if (!p || !/^\d{17,20}$/.test(customerId) ||
-            !Number.isInteger(quantity) || quantity < 1) {
-          await i.reply({ content: '❌ Invalid order information.', ephemeral: true });
-          return;
-        }
-
-        const oldEmbed = i.message.embeds[0];
-
-        if (!oldEmbed || oldEmbed.fields?.some(
-          f => f.name === '📌 Status' && f.value.includes('Payment confirmed')
-        )) {
-          await i.reply({ content: '⚠️ This order is already processed.', ephemeral: true });
-          return;
-        }
-
-        if (p.stock < quantity) {
-          await i.reply({
-            content: `❌ Not enough stock. Current stock: ${p.stock}`,
-            ephemeral: true,
-          });
-          return;
-        }
-
-        const previousStock = p.stock;
-        p.stock -= quantity;
-
-        if (!saveProducts()) {
-          p.stock = previousStock;
-          await i.reply({ content: '❌ Could not save inventory.', ephemeral: true });
-          return;
-        }
-
-        const updatedEmbed = EmbedBuilder.from(oldEmbed)
-          .setColor(0x2ECC71)
-          .spliceFields(5, 1, {
-            name: '📌 Status',
-            value: `✅ Payment confirmed by ${i.user.tag}`,
-          });
-
-        const disabledRows = i.message.components.map(row =>
-          new ActionRowBuilder().addComponents(
-            row.components.map(component =>
-              ButtonBuilder.from(component).setDisabled(true)
-            )
-          )
-        );
-
-        await i.update({
-          embeds: [updatedEmbed],
-          components: disabledRows,
-        });
-
-        try {
-          const buyer = await client.users.fetch(customerId);
-          await buyer.send(
-            `✅ VENOM SHOP payment confirmed!\n` +
-            `Product: ${p.name}\nQuantity: ${quantity}\n` +
-            `Total: ${p.price * quantity}\nRemaining stock: ${p.stock}`
-          );
-        } catch (error) {
-          console.warn('Could not DM customer:', error.message);
-        }
-
-        return;
-      }
-    }
-
-    // PRODUCT MENU
-
-    if (i.isStringSelectMenu() && i.customId === 'venom_product_select') {
-      const id = i.values[0];
-      const p = products.get(id);
-
-      if (!p || p.stock < 1) {
-        await i.reply({ content: '❌ Product out of stock.', ephemeral: true });
-        return;
-      }
-
-      const modal = new ModalBuilder()
-        .setCustomId(`venom_quantity_${id}`)
-        .setTitle('Choose quantity');
-
-      const input = new TextInputBuilder()
-        .setCustomId('quantity')
-        .setLabel(`Quantity (stock: ${p.stock})`)
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder('1')
-        .setRequired(true)
-        .setMinLength(1)
-        .setMaxLength(4);
-
-      modal.addComponents(new ActionRowBuilder().addComponents(input));
-      await i.showModal(modal);
-      return;
-    }
-
-    // ORDER MODAL
-
-    if (i.isModalSubmit() && i.customId.startsWith('venom_quantity_')) {
-      const id = i.customId.slice('venom_quantity_'.length);
-      const p = products.get(id);
-      const quantity = Number(i.fields.getTextInputValue('quantity').trim());
-
-      if (!p) {
-        await i.reply({ content: '❌ Product not found.', ephemeral: true });
-        return;
-      }
-
-      if (!Number.isInteger(quantity) || quantity < 1 || quantity > p.stock) {
-        await i.reply({
-          content: `❌ Enter a whole number from 1 to ${p.stock}.`,
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (!i.guild) {
-        await i.reply({ content: 'Place orders inside the server.', ephemeral: true });
-        return;
-      }
-
-      await i.deferReply({ ephemeral: true });
-
-      let ticket;
-
-      try {
-        ticket = await createPrivateChannel(
-          i.guild,
-          `order-${slugify(i.user.username).slice(0, 20)}`,
-          i.user.id
-        );
-
-        const total = p.price * quantity;
-
-        const embed = new EmbedBuilder()
-          .setColor(RED)
-          .setTitle('📦 VENOM SHOP — ORDER')
-          .addFields(
-            { name: '👤 Customer', value: `<@${i.user.id}>` },
-            { name: '🛒 Product', value: p.name },
-            { name: '🔢 Quantity', value: String(quantity), inline: true },
-            { name: '💰 Unit price', value: String(p.price), inline: true },
-            { name: '💳 Total', value: `**${total}**`, inline: true },
-            { name: '📌 Status', value: '⏳ Waiting for staff to confirm payment' }
+      { name: '📌 Status', value: '⏳ Waiting for staff to confirm payment' }
           )
           .setFooter({ text: `Product ID: ${id} | Customer ID: ${i.user.id}` });
 
