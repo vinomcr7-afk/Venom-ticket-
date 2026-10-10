@@ -1,355 +1,71 @@
 
-const fs = require('node:fs');
-const path = require('node:path');
-
 const {
   Client,
   GatewayIntentBits,
-  REST,
-  Routes,
-  SlashCommandBuilder,
   EmbedBuilder,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
-  StringSelectMenuBuilder,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  ChannelType,
-  PermissionFlagsBits,
+  Events
 } = require('discord.js');
 
-// =============== CONFIG ===============
-
-const TOKEN = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID = process.env.GUILD_ID || '';
-const STAFF_ROLE_ID = process.env.STAFF_ROLE_ID || '';
-const SHOP_BANNER_URL = process.env.SHOP_BANNER_URL || '';
-
-const DATA_DIR = process.env.DATA_DIR || process.cwd();
-const DATA_FILE = path.join(DATA_DIR, 'venom-products.json');
-
+const TOKEN = process.env.TOKEN;
 const RED = 0xE50914;
 
-if (!TOKEN || !CLIENT_ID) {
-  console.error('Missing DISCORD_TOKEN or CLIENT_ID');
+if (!TOKEN) {
+  console.error('❌ TOKEN is missing in Railway Variables.');
   process.exit(1);
 }
 
-// =============== PRODUCTS ===============
-
-const defaults = [
-  { id: 'kit-blue-laptop', name: 'Electronic Kit + Blue Laptop', price: 100, stock: 10, image: '' },
-  { id: 'advanced-decry', name: 'Advanced Decry + Plasma Cutter', price: 150, stock: 8, image: '' },
-  { id: 'thermite-c4', name: 'Thermite + C4 Charge + BasicDecrypter', price: 200, stock: 5, image: '' },
-  { id: 'lighter-drill', name: 'Lighter + Security Card A + Large Drill', price: 75, stock: 12, image: '' },
-];
-
-function loadProducts() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-
-      if (Array.isArray(data)) {
-        return new Map(
-          data
-            .filter(p =>
-              p &&
-              typeof p.id === 'string' &&
-              typeof p.name === 'string' &&
-              Number.isFinite(p.price) &&
-              p.price >= 0 &&
-              Number.isInteger(p.stock) &&
-              p.stock >= 0
-            )
-            .map(p => [p.id, p])
-        );
-      }
-    }
-  } catch (error) {
-    console.error('Product load error:', error);
-  }
-
-  return new Map(defaults.map(p => [p.id, { ...p }]));
-}
-
-const products = loadProducts();
-
-function saveProducts() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify([...products.values()], null, 2));
-    return true;
-  } catch (error) {
-    console.error('Product save error:', error);
-    return false;
-  }
-}
-
-function slugify(value) {
-  return value.toLowerCase()
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 40) || `product-${Date.now().toString(36)}`;
-}
-
-function isStaff(i) {
-  if (i.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-    return true;
-  }
-
-  const roles = i.member?.roles;
-
-  if (roles?.cache?.has(STAFF_ROLE_ID)) return true;
-  return Array.isArray(roles) && roles.includes(STAFF_ROLE_ID);
-}
-
-// =============== SHOP DISPLAY ===============
-
-function shopEmbed() {
-  const embed = new EmbedBuilder()
-    .setColor(RED)
-    .setTitle('🛒 VENOM SHOP')
-    .setDescription('Choose a product below to place an order.');
-
-  if (SHOP_BANNER_URL) embed.setImage(SHOP_BANNER_URL);
-
-  const list = [...products.values()].slice(0, 25);
-
-  if (!list.length) {
-    embed.addFields({
-      name: 'No products',
-      value: 'Staff can add products with /addproduct.',
-    });
-  }
-
-  for (const p of list) {
-    embed.addFields({
-      name: p.name.slice(0, 256),
-      value: `Price: **${p.price}**\nStock: **${p.stock}**\nID: \`${p.id}\``,
-      inline: true,
-    });
-  }
-
-  return embed;
-}
-
-function shopComponents() {
-  const list = [...products.values()]
-    .filter(p => p.stock > 0)
-    .slice(0, 25);
-
-  if (!list.length) return [];
-
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId('venom_product_select')
-    .setPlaceholder('Choose a product')
-    .addOptions(list.map(p => ({
-      label: p.name.slice(0, 100),
-      description: `Price: ${p.price} | Stock: ${p.stock}`.slice(0, 100),
-      value: p.id,
-    })));
-
-  return [new ActionRowBuilder().addComponents(menu)];
-}
-
-// =============== SLASH COMMANDS ===============
-
-const commands = [
-  new SlashCommandBuilder()
-    .setName('ticketpanel')
-    .setDescription('Publish VENOM shop and support panel'),
-
-  new SlashCommandBuilder()
-    .setName('shop')
-    .setDescription('View available products'),
-
-  new SlashCommandBuilder()
-    .setName('addproduct')
-    .setDescription('Add a product')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption(o => o.setName('name').setDescription('Product name').setRequired(true))
-    .addNumberOption(o => o.setName('price').setDescription('Product price').setRequired(true).setMinValue(0))
-    .addIntegerOption(o => o.setName('stock').setDescription('Available stock').setRequired(true).setMinValue(0))
-    .addStringOption(o => o.setName('image').setDescription('Image URL').setRequired(false)),
-
-  new SlashCommandBuilder()
-    .setName('setstock')
-    .setDescription('Update product stock')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption(o => o.setName('product_id').setDescription('Product ID').setRequired(true))
-    .addIntegerOption(o => o.setName('quantity').setDescription('New quantity').setRequired(true).setMinValue(0)),
-
-  new SlashCommandBuilder()
-    .setName('removeproduct')
-    .setDescription('Remove a product')
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-    .addStringOption(o => o.setName('product_id').setDescription('Product ID').setRequired(true)),
-].map(c => c.toJSON());
-
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [GatewayIntentBits.Guilds]
 });
 
-// =============== REGISTER COMMANDS ===============
+client.once(Events.ClientReady, (readyClient) => {
+  console.log(`🔴 VENOM SHOP online as ${readyClient.user.tag}`);
+});
 
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
-
-  if (GUILD_ID) {
-    await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      { body: commands }
-    );
-    console.log('Guild commands registered.');
-  } else {
-    await rest.put(
-      Routes.applicationCommands(CLIENT_ID),
-      { body: commands }
-    );
-    console.log('Global commands registered.');
-  }
-}
-
-// =============== TICKETS ===============
-
-async function createPrivateChannel(guild, name, userId) {
-  const overwrites = [
-    {
-      id: guild.roles.everyone.id,
-      deny: [PermissionFlagsBits.ViewChannel],
-    },
-    {
-      id: userId,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-        PermissionFlagsBits.AttachFiles,
-      ],
-    },
-  ];
-
-  if (STAFF_ROLE_ID) {
-    overwrites.push({
-      id: STAFF_ROLE_ID,
-      allow: [
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.ReadMessageHistory,
-      ],
-    });
-  }
-
-  return guild.channels.create({
-    name: name.slice(0, 100),
-    type: ChannelType.GuildText,
-    permissionOverwrites: overwrites,
-    reason: 'VENOM SHOP ticket',
-  });
-}
-
-// =============== INTERACTIONS ===============
-
-client.on('interactionCreate', async i => {
+client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // SLASH COMMANDS
+    if (!interaction.isChatInputCommand()) return;
 
-    if (i.isChatInputCommand()) {
-      if (i.commandName === 'ticketpanel') {
-        if (!i.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
-          await i.reply({
-            content: '❌ You need Manage Server permission.',
-            ephemeral: true,
-          });
-          return;
-        }
+    if (interaction.commandName === 'shop') {
+      const embed = new EmbedBuilder()
+        .setColor(RED)
+        .setTitle('🔴 VENOM SHOP')
+        .setDescription(
+          'Welcome to VENOM SHOP!\n\n' +
+          '🛒 Browse our products\n' +
+          '🎫 Open a ticket for assistance\n' +
+          '💳 Contact staff for payment information'
+        )
+        .setFooter({ text: 'VENOM SHOP • Official Store' });
 
-        const embed = new EmbedBuilder()
-          .setColor(RED)
-          .setTitle('🔴 VENOM SHOP | SUPPORT')
-          .setDescription('Choose an option below.');
+      await interaction.reply({
+        embeds: [embed],
+        ephemeral: true
+      });
+    }
+  } catch (error) {
+    console.error('Interaction error:', error);
 
-        if (SHOP_BANNER_URL) embed.setImage(SHOP_BANNER_URL);
+    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: '❌ An error occurred. Please contact staff.',
+        ephemeral: true
+      }).catch(console.error);
+    }
+  }
+});
 
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setCustomId('venom_open_shop')
-            .setLabel('GO TO SHOP')
-            .setEmoji('🛒')
-            .setStyle(ButtonStyle.Danger),
+async function startBot() {
+  try {
+    await client.login(TOKEN);
+  } catch (error) {
+    console.error('Startup error:', error);
+    process.exitCode = 1;
+  }
+}
 
-          new ButtonBuilder()
-            .setCustomId('venom_open_support')
-            .setLabel('OPEN SUPPORT')
-            .setEmoji('🎫')
-            .setStyle(ButtonStyle.Secondary)
-        );
-
-        await i.channel.send({ embeds: [embed], components: [row] });
-        await i.reply({ content: '✅ Panel published.', ephemeral: true });
-        return;
-      }
-
-      if (i.commandName === 'shop') {
-        await i.reply({
-          embeds: [shopEmbed()],
-          components: shopComponents(),
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if (['addproduct', 'setstock', 'removeproduct'].includes(i.commandName)) {
-        if (!isStaff(i)) {
-          await i.reply({ content: '❌ Staff only.', ephemeral: true });
-          return;
-        }
-
-        if (i.commandName === 'addproduct') {
-          const name = i.options.getString('name', true).trim();
-          const price = i.options.getNumber('price', true);
-          const stock = i.options.getInteger('stock', true);
-          const image = i.options.getString('image') || '';
-
-          if (!name || name.length > 256) {
-            await i.reply({ content: '❌ Invalid product name.', ephemeral: true });
-            return;
-          }
-
-          if (image && !/^https?:\/\/\S+$/i.test(image)) {
-            await i.reply({ content: '❌ Image must be an HTTP/HTTPS URL.', ephemeral: true });
-            return;
-          }
-
-          const id = slugify(name);
-
-          if (products.has(id)) {
-            await i.reply({ content: `❌ Product ID already exists: ${id}`, ephemeral: true });
-            return;
-          }
-
-          const p = { id, name, price, stock, image };
-          products.set(id, p);
-
-          if (!saveProducts()) {
-            products.delete(id);
-            await i.reply({ content: '❌ Could not save product.', ephemeral: true });
-            return;
-          }
-
-          await i.reply({
-            content: `✅ Added **${name}**. ID: \`${id}\``,
-            ephemeral: true,
-          });
-          return;
-        }
-
-        if (i.commandName === 'setstock') {
+startBot();
+e === 'setstock') {
           const id = i.options.getString('product_id', true);
           const quantity = i.options.getInteger('quantity', true);
           const p = products.get(id);
