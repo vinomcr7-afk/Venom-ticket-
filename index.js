@@ -696,3 +696,196 @@ registerCommands()
     process.exit(1);
   });
         
+
+    // Order button: ask the customer for quantity
+    if (
+      interaction.isButton() &&
+      interaction.customId.startsWith('venom_order_')
+    ) {
+      const productId = interaction.customId.slice(
+        'venom_order_'.length
+      );
+
+      const product = products.get(productId);
+
+      if (!product || product.stock < 1) {
+        await interaction.reply({
+          content: '❌ المنتج غير متوفر.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const modal = new ModalBuilder()
+        .setCustomId(`venom_quantity_${productId}`)
+        .setTitle('اختيار الكمية');
+
+      const quantityInput = new TextInputBuilder()
+        .setCustomId('quantity')
+        .setLabel('كم قطعة تريد؟')
+        .setPlaceholder('مثال: 2')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+        .setMaxLength(5);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(quantityInput)
+      );
+
+      await interaction.showModal(modal);
+      return;
+    }
+
+    // Process the selected quantity and create a private order ticket
+    if (
+      interaction.isModalSubmit() &&
+      interaction.customId.startsWith('venom_quantity_')
+    ) {
+      const productId = interaction.customId.slice(
+        'venom_quantity_'.length
+      );
+
+      const product = products.get(productId);
+      const quantity = Number(
+        interaction.fields.getTextInputValue('quantity')
+      );
+
+      if (!product) {
+        await interaction.reply({
+          content: '❌ المنتج غير موجود.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      if (
+        !Number.isInteger(quantity) ||
+        quantity < 1 ||
+        quantity > product.stock
+      ) {
+        await interaction.reply({
+          content: `❌ الكمية غير صحيحة. المخزون المتاح: ${product.stock}`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      const guild = interaction.guild;
+
+      if (!guild) {
+        await interaction.reply({
+          content: 'يجب طلب المنتج من داخل السيرفر.',
+          ephemeral: true
+        });
+        return;
+      }
+
+      const total = product.price * quantity;
+      const safeName = interaction.user.username
+        .toLowerCase()
+        .replace(/[^a-z0-9-]/g, '')
+        .slice(0, 20) || 'client';
+
+      const permissions = [
+        {
+          id: guild.roles.everyone.id,
+          deny: [PermissionFlagsBits.ViewChannel]
+        },
+        {
+          id: interaction.user.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ReadMessageHistory
+          ]
+        }
+      ];
+
+      if (STAFF_ROLE_ID) {
+        const staffRole = guild.roles.cache.get(STAFF_ROLE_ID);
+
+        if (staffRole) {
+          permissions.push({
+            id: staffRole.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ReadMessageHistory
+            ]
+          });
+        }
+      }
+
+      const ticket = await guild.channels.create({
+        name: `order-${safeName}-${Date.now().toString().slice(-4)}`,
+        type: ChannelType.GuildText,
+        permissionOverwrites: permissions,
+        reason: 'VENOM SHOP customer order'
+      });
+
+      const embed = new EmbedBuilder()
+        .setColor(0x168CFF)
+        .setTitle('📦 VENOM SHOP — ORDER')
+        .addFields(
+          {
+            name: '👤 الزبون',
+            value: `<@${interaction.user.id}>`
+          },
+          {
+            name: '🛒 المنتج',
+            value: product.name
+          },
+          {
+            name: '🔢 الكمية',
+            value: String(quantity),
+            inline: true
+          },
+          {
+            name: '💰 سعر القطعة',
+            value: String(product.price),
+            inline: true
+          },
+          {
+            name: '💳 المجموع',
+            value: `**${total}**`,
+            inline: true
+          },
+          {
+            name: '📌 الحالة',
+            value: 'في انتظار تأكيد الدفع'
+          }
+        )
+        .setFooter({
+          text: `Product ID: ${productId}`
+        });
+
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(
+            `venom_paid_${productId}_${quantity}_${interaction.user.id}`
+          )
+          .setLabel('تأكيد الدفع')
+          .setStyle(ButtonStyle.Success),
+
+        new ButtonBuilder()
+          .setCustomId('venom_close_order')
+          .setLabel('إغلاق التذكرة')
+          .setStyle(ButtonStyle.Secondary)
+      );
+
+      await ticket.send({
+        content: STAFF_ROLE_ID
+          ? `<@${interaction.user.id}> <@&${STAFF_ROLE_ID}>`
+          : `<@${interaction.user.id}>`,
+        embeds: [embed],
+        components: [buttons]
+      });
+
+      await interaction.reply({
+        content: `✅ تم إنشاء تذكرة طلبك: ${ticket}`,
+        ephemeral: true
+      });
+
+      return;
+            }
+            
