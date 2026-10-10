@@ -6,6 +6,7 @@ const {
   Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder,
   EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle,
   StringSelectMenuBuilder, ModalBuilder, TextInputBuilder,
+ await channel.setTopic(
   TextInputStyle, ChannelType, PermissionFlagsBits,
 } = require('discord.js');
 
