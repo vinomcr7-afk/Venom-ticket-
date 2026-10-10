@@ -607,8 +607,12 @@ client.once('ready', () => {
       product.stock -= 1;
       saveProducts();
 
-      async function closeTicket() {
-        channel.topic.replace("VENOM_PAID=0", "VENOM_PAID=1")
+      await channel.setTopic(
+  (channel.topic || "").replace(
+    "VENOM_PAID=0",
+    "VENOM_PAID=1"
+  )
+);
       );
 
       const oldEmbed = interaction.message.embeds[0];
