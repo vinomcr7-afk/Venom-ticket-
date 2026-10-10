@@ -607,7 +607,7 @@ client.once('ready', () => {
       product.stock -= 1;
       saveProducts();
 
-      await channel.setTopic(
+      async function closeTicket() {
         channel.topic.replace("VENOM_PAID=0", "VENOM_PAID=1")
       );
 
